@@ -1,0 +1,17 @@
+syntax = "proto2";
+package refs;
+
+message Oplog {
+    message Op {
+        required string name = 1;
+        optional bytes target = 2;
+        optional bytes old_target = 3;
+    };
+    repeated Op ops = 1;
+
+// [oneof
+    optional bytes obj_pack = 16;
+    repeated bytes objs = 17;
+    repeated string params = 18;
+// oneof]
+}
