@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
 	"gopkg.in/src-d/go-git.v4/plumbing"
@@ -37,12 +38,21 @@ type httpGitAPI struct {
 	rdb  Storage
 	node raft.Node
 	*http.ServeMux
+
+	logger logging.Logger
 }
 
-func NewGitHandler(path string, rdb Storage, node raft.Node) *httpGitAPI {
+func NewGitHandler(
+	path string,
+	rdb Storage,
+	node raft.Node,
+	logger logging.Logger,
+) *httpGitAPI {
 	h := &httpGitAPI{
-		rdb:  rdb,
-		node: node,
+		path:   path,
+		rdb:    rdb,
+		node:   node,
+		logger: logger,
 	}
 
 	mux := http.NewServeMux()
@@ -224,13 +234,22 @@ func (h *httpGitAPI) serviceRPC(w http.ResponseWriter, r *http.Request, service 
 	}
 
 	var stderr bytes.Buffer
-	cmd := exec.Command("git", service, "--stateless-rpc", h.path)
-	cmd.Dir = h.path
+
+	args := []string{
+		service,
+		"--stateless-rpc",
+		h.path,
+	}
+
+	cmd := exec.Command("git", args...)
 	cmd.Stdout = w
 	cmd.Stderr = &stderr
 	cmd.Stdin = reqBody
 	if err := cmd.Run(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		h.logger.Warning("run cmd failed, args: ", args,
+			", err: ", err,
+			", stderr: ", stderr.String())
 		return
 	}
 }

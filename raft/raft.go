@@ -75,25 +75,19 @@ type raftNode struct {
 // provided the proposal channel. All log entries are replayed over the
 // commit channel, followed by a nil message (to indicate the channel is
 // current), then new log entries. To shutdown, close proposeC and read errorC.
-func RunNode(id PeerID, peers []PeerID, storage Storage) (Node, error) {
+func RunNode(c Config, peers []PeerID, storage Storage) (Node, error) {
 
 	rpeers := make([]raft.Peer, 0, len(peers))
 	for _, peer := range peers {
 		rpeers = append(rpeers, raft.Peer{ID: uint64(peer)})
 	}
 
-	c := &raft.Config{
-		ID:                        uint64(id),
-		ElectionTick:              10,
-		HeartbeatTick:             1,
-		Storage:                   storage,
-		MaxSizePerMsg:             1024 * 1024,
-		MaxInflightMsgs:           256,
-		MaxUncommittedEntriesSize: 1 << 30,
-		PreVote:                   true,
+	id := PeerID(c.ID)
+	if c.Storage == nil {
+		c.Storage = storage
 	}
 
-	node, err := raft.NewRawNode(c, rpeers)
+	node, err := raft.NewRawNode(&c.Config, rpeers)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +110,7 @@ func RunNode(id PeerID, peers []PeerID, storage Storage) (Node, error) {
 	transport := &rafthttp.Transport{
 		Logger:      zap.NewNop(),
 		ID:          types.ID(id),
-		ClusterID:   0x1000,
+		ClusterID:   c.ClusterID,
 		Raft:        rc,
 		ServerStats: stats.NewServerStats("", ""),
 		LeaderStats: stats.NewLeaderStats(id.String()),
@@ -136,7 +130,7 @@ func RunNode(id PeerID, peers []PeerID, storage Storage) (Node, error) {
 	rc.transport = transport
 
 	go func() {
-		err := rc.serveRaft(node)
+		err := rc.serveRaft(node, c.TickDuration)
 		rc.raftResult = err
 		close(rc.raftDoneC)
 		rc.eventLogger.Warning("node stopped, err: ", err)
@@ -273,19 +267,31 @@ func readyForLogger(rd *raft.Ready) []interface{} {
 		}
 	}
 
+	msgCnt := 0
+
 	if len(rd.Messages) > 0 {
 		logFields = append(logFields, ", Messages: ", len(rd.Messages))
+		for i := range rd.Messages {
+			switch rd.Messages[i].Type {
+			case pb.MsgHeartbeat:
+				continue
+			case pb.MsgHeartbeatResp:
+				continue
+			}
+			msgCnt++
+			logFields = append(logFields, (*Message)(&rd.Messages[i]))
+		}
 	}
 
-	if len(logFields) == 3 && len(rd.Messages) > 0 {
+	if len(logFields) == 3+msgCnt && len(rd.Messages) > 0 {
 		return nil
 	}
 
 	return logFields
 }
 
-func (rc *raftNode) serveRaft(node *raft.RawNode) error {
-	ticker := time.NewTicker(1 * time.Second)
+func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
+	ticker := time.NewTicker(d)
 	defer ticker.Stop()
 
 	confChangeCount := uint64(0)
@@ -514,7 +520,18 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, w io.Writer) 
 
 func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 	return rc.withPipeline(ctx, func(node *raft.RawNode) error {
-		return node.Step(m)
+		if err := node.Step(m); err != nil {
+			rc.raftLogger.Warning("step message failed, from: ", PeerID(m.From),
+				", to: ", PeerID(m.To), ", err: ", err, ", msg: ", m)
+			return err
+		}
+		switch m.Type {
+		case pb.MsgHeartbeat:
+		case pb.MsgHeartbeatResp:
+		default:
+			rc.raftLogger.Info("recv message: ", (*Message)(&m))
+		}
+		return nil
 	})
 }
 
