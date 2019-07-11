@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 
@@ -34,4 +35,46 @@ func (s Status) String() string {
 		log.Panicf("unexpected error: %v", err)
 	}
 	return string(b)
+}
+
+func (s Status) MemberStatus() *MemberStatus {
+	mstatus := &MemberStatus{
+		ID:        PeerID(s.ID).String(),
+		Lead:      PeerID(s.Lead).String(),
+		RaftState: s.RaftState.String(),
+	}
+	mstatus.Progress = make(map[string]Tracker, 0)
+
+	for k, v := range s.Progress {
+		tracker := Tracker{
+			Match: v.Match,
+			Next:  v.Next,
+			State: v.State.String(),
+		}
+		id := PeerID(k).String()
+		mstatus.Progress[id] = tracker
+	}
+
+	return mstatus
+}
+
+type Tracker struct {
+	Match uint64 `json:"match"`
+	Next  uint64 `json:"next"`
+	State string `json:"state"`
+}
+
+type MemberStatus struct {
+	ID        string             `json:"id"`
+	Lead      string             `json:"lead"`
+	RaftState string             `json:"raftState"`
+	Progress  map[string]Tracker `json:"progress"`
+}
+
+func (s MemberStatus) String() string {
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err.Error()
+	}
+	return string(data)
 }

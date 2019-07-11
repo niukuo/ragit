@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,7 +198,9 @@ func (rc *raftNode) applyEntries(node *raft.RawNode, ents []pb.Entry) error {
 					rc.transport.AddPeer(types.ID(cc.NodeID), []string{"http://" + PeerID(cc.NodeID).Addr()})
 				}
 			case pb.ConfChangeRemoveNode:
-				rc.transport.RemovePeer(types.ID(cc.NodeID))
+				if cc.NodeID != uint64(rc.id) && rc.transport.Get(types.ID(cc.NodeID)) != nil {
+					rc.transport.RemovePeer(types.ID(cc.NodeID))
+				}
 			}
 		}
 	}
@@ -395,6 +398,8 @@ func (rc *raftNode) InitRouter(mux *http.ServeMux) {
 	mux.Handle("/raft", rh)
 	mux.Handle("/raft/", rh)
 	mux.HandleFunc("/raft/status", rc.getStatus)
+	mux.HandleFunc("/raft/members", rc.getMemberStatus)
+	mux.HandleFunc("/raft/members/", rc.confChange)
 }
 
 func (rc *raftNode) withPipeline(ctx context.Context, fn func(node *raft.RawNode) error) error {
@@ -431,6 +436,50 @@ func (rc *raftNode) GetStatus(ctx context.Context) (*Status, error) {
 	return &status, nil
 }
 
+func (rc *raftNode) getMemberStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := rc.GetStatus(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	memberStatus := status.MemberStatus()
+
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	encoder.Encode(memberStatus)
+}
+
+func (rc *raftNode) confChange(w http.ResponseWriter, r *http.Request) {
+	var opType pb.ConfChangeType
+	switch r.Method {
+	case http.MethodPost:
+		opType = pb.ConfChangeAddNode
+	case http.MethodDelete:
+		opType = pb.ConfChangeRemoveNode
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id := strings.TrimPrefix(r.URL.Path, "/raft/members/")
+	nodeID, err := ParsePeerID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	cc := pb.ConfChange{
+		Type:   opType,
+		NodeID: uint64(nodeID),
+	}
+	rc.confChangeC <- cc
+
+	// As above, optimistic that raft will apply the conf change
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (rc *raftNode) getStatus(w http.ResponseWriter, r *http.Request) {
 
 	status, err := rc.GetStatus(r.Context())
@@ -444,7 +493,6 @@ func (rc *raftNode) getStatus(w http.ResponseWriter, r *http.Request) {
 	encoder.SetIndent("", "  ")
 
 	encoder.Encode(status)
-
 }
 
 func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, w io.Writer) error {
