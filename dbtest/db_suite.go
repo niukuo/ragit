@@ -32,6 +32,11 @@ func (s *DBSuite) TearDownTest() {
 }
 
 func (s *DBSuite) TestWAL() {
+	var state pb.HardState
+	state.Term = 2
+	testObjSrcId, err := ragit.ParsePeerID("127.0.0.1:8080")
+	s.NoError(err)
+
 	first, err := s.db.FirstIndex()
 	s.NoError(err)
 	s.Equal(uint64(1), first)
@@ -40,10 +45,10 @@ func (s *DBSuite) TestWAL() {
 	s.Equal(uint64(0), last)
 
 	s.NoError(s.db.Save(pb.HardState{}, []pb.Entry{
-		pb.Entry{Term: 1, Index: 3},
-		pb.Entry{Term: 1, Index: 4},
-		pb.Entry{Term: 1, Index: 5},
-	}, pb.Snapshot{}, false))
+		{Term: 1, Index: 3},
+		{Term: 1, Index: 4},
+		{Term: 1, Index: 5},
+	}, pb.Snapshot{}, testObjSrcId, false))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -54,10 +59,10 @@ func (s *DBSuite) TestWAL() {
 	s.Equal(uint64(5), last)
 
 	s.NoError(s.db.Save(pb.HardState{}, []pb.Entry{
-		pb.Entry{Term: 1, Index: 6},
-		pb.Entry{Term: 1, Index: 7},
-		pb.Entry{Term: 1, Index: 8},
-	}, pb.Snapshot{}, false))
+		{Term: 1, Index: 6},
+		{Term: 1, Index: 7},
+		{Term: 1, Index: 8},
+	}, pb.Snapshot{}, testObjSrcId, false))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -68,8 +73,8 @@ func (s *DBSuite) TestWAL() {
 	s.Equal(uint64(8), last)
 
 	s.NoError(s.db.Save(pb.HardState{}, []pb.Entry{
-		pb.Entry{Term: 1, Index: 7},
-	}, pb.Snapshot{}, false))
+		{Term: 1, Index: 7},
+	}, pb.Snapshot{}, testObjSrcId, false))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -80,8 +85,8 @@ func (s *DBSuite) TestWAL() {
 	s.Equal(uint64(7), last)
 
 	s.NoError(s.db.Save(pb.HardState{}, []pb.Entry{
-		pb.Entry{Term: 1, Index: 11},
-	}, pb.Snapshot{}, false))
+		{Term: 1, Index: 11},
+	}, pb.Snapshot{}, testObjSrcId, false))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -92,9 +97,9 @@ func (s *DBSuite) TestWAL() {
 	s.Equal(uint64(11), last)
 
 	s.Error(s.db.Save(pb.HardState{}, []pb.Entry{
-		pb.Entry{Term: 1, Index: 11},
-		pb.Entry{Term: 1, Index: 13},
-	}, pb.Snapshot{}, false))
+		{Term: 1, Index: 11},
+		{Term: 1, Index: 13},
+	}, pb.Snapshot{}, testObjSrcId, false))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -105,10 +110,10 @@ func (s *DBSuite) TestWAL() {
 	s.Equal(uint64(11), last)
 
 	s.NoError(s.db.Save(pb.HardState{}, []pb.Entry{
-		pb.Entry{Term: 1, Index: 111},
-		pb.Entry{Term: 2, Index: 112},
-		pb.Entry{Term: 3, Index: 113},
-	}, pb.Snapshot{}, false))
+		{Term: 1, Index: 111},
+		{Term: 2, Index: 112},
+		{Term: 3, Index: 113},
+	}, pb.Snapshot{}, testObjSrcId, false))
 
 	ents, err := s.db.Entries(111, 114, 100)
 	s.NoError(err)
@@ -129,9 +134,7 @@ func (s *DBSuite) TestWAL() {
 	s.True(raft.IsEmptyHardState(hardState))
 	s.Len(confState.Nodes, 0)
 
-	var state pb.HardState
-	state.Term = 2
-	s.NoError(s.db.Save(state, nil, pb.Snapshot{}, false))
+	s.NoError(s.db.Save(state, nil, pb.Snapshot{}, testObjSrcId, false))
 	hardState, confState, err = s.db.InitialState()
 	s.False(raft.IsEmptyHardState(hardState))
 }
@@ -150,11 +153,11 @@ func (s *DBSuite) TestApply() {
 
 	opAdd := refs.Oplog{
 		Ops: []*refs.Oplog_Op{
-			&refs.Oplog_Op{
+			{
 				Name:   proto.String("refs/heads/master"),
 				Target: []byte("1234567890abcdef1234"),
 			},
-			&refs.Oplog_Op{
+			{
 				Name:   proto.String("refs/heads/branch2"),
 				Target: []byte("1234567890abcdef1234"),
 			},
@@ -163,20 +166,20 @@ func (s *DBSuite) TestApply() {
 
 	opUpdateRemove := refs.Oplog{
 		Ops: []*refs.Oplog_Op{
-			&refs.Oplog_Op{
+			{
 				Name:      proto.String("refs/heads/master"),
 				Target:    []byte("1234567890abcdef1235"),
 				OldTarget: []byte("1234567890abcdef1234"),
 			},
-			&refs.Oplog_Op{
+			{
 				Name:      proto.String("refs/heads/branch2"),
 				OldTarget: []byte("1234567890abcdef1234"),
 			},
 		},
 	}
 
-	s.Error(s.db.Apply(1, 2, opAdd, nil))
-	s.NoError(s.db.Apply(2, 1, opAdd, nil))
+	s.Error(s.db.Apply(1, 2, opAdd, ragit.PeerID(0), nil))
+	s.NoError(s.db.Apply(2, 1, opAdd, ragit.PeerID(0), nil))
 
 	snapshot, err = s.db.Snapshot()
 	s.NoError(err)
@@ -188,8 +191,8 @@ func (s *DBSuite) TestApply() {
 3132333435363738393061626364656631323334 refs/heads/master
 `, string(snapshot.Data))
 
-	s.Error(s.db.Apply(3, 1, opUpdateRemove, nil))
-	s.NoError(s.db.Apply(3, 2, opUpdateRemove, nil))
+	s.Error(s.db.Apply(3, 1, opUpdateRemove, ragit.PeerID(0), nil))
+	s.NoError(s.db.Apply(3, 2, opUpdateRemove, ragit.PeerID(0), nil))
 
 	snapshot, err = s.db.Snapshot()
 	s.NoError(err)
@@ -215,7 +218,13 @@ func (s *DBSuite) TestApply() {
 `)
 	snapshot.Metadata.Term = 5
 	snapshot.Metadata.Index = 10
-	s.NoError(s.db.Save(pb.HardState{}, nil, snapshot, false))
+	testObjSrcId, err := ragit.ParsePeerID("127.0.0.1:8080")
+	s.NoError(err)
+	s.Error(s.db.Save(pb.HardState{}, nil, snapshot, testObjSrcId, false))
+
+	testObjSrcId, err = ragit.ParsePeerID("127.0.0.1:8082")
+	s.NoError(err)
+	s.NoError(s.db.Save(pb.HardState{}, nil, snapshot, testObjSrcId, false))
 
 	curSnap, err := s.db.Snapshot()
 	s.Equal(string(snapshot.Data), string(curSnap.Data))
@@ -227,10 +236,9 @@ func (s *DBSuite) TestApply() {
 `)
 	snapshot.Metadata.Term = 5
 	snapshot.Metadata.Index = 10
-	s.NoError(s.db.Save(pb.HardState{}, nil, snapshot, false))
+	s.NoError(s.db.Save(pb.HardState{}, nil, snapshot, testObjSrcId, false))
 
 	curSnap, err = s.db.Snapshot()
 	s.Equal(string(snapshot.Data), string(curSnap.Data))
 	s.Equal(snapshot.Metadata, curSnap.Metadata)
-
 }

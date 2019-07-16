@@ -156,7 +156,7 @@ func reportErrToMsg(msg *msgWithResult, err error) {
 
 // applyEntries writes committed log entries to commit channel and returns
 // whether all entries could be published.
-func (rc *raftNode) applyEntries(node *raft.RawNode, ents []pb.Entry) error {
+func (rc *raftNode) applyEntries(node *raft.RawNode, srcId PeerID, ents []pb.Entry) error {
 	sm := rc.storage
 	for i := range ents {
 		entry := &ents[i]
@@ -179,7 +179,7 @@ func (rc *raftNode) applyEntries(node *raft.RawNode, ents []pb.Entry) error {
 			if err := proto.Unmarshal(entry.Data, &oplog); err != nil {
 				return err
 			}
-			if err := sm.Apply(entry.Term, entry.Index, oplog, retCh); err != nil {
+			if err := sm.Apply(entry.Term, entry.Index, oplog, srcId, retCh); err != nil {
 				return err
 			}
 
@@ -303,6 +303,7 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 	var lastReady *raft.Ready
 	raftState := raft.StateFollower
 
+	leader := PeerID(0)
 	for {
 		var rd *raft.Ready
 		if lastReady != nil {
@@ -316,15 +317,23 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 			if fields := readyForLogger(rd); fields != nil {
 				rc.raftLogger.Info(fields...)
 			}
+
 			if rd.SoftState != nil {
 				rc.eventLogger.Infof("soft state changed from %s to %s", raftState, rd.SoftState.RaftState)
 				raftState = rd.SoftState.RaftState
+				leader = PeerID(rd.SoftState.Lead)
 			}
-			if err := rc.storage.Save(rd.HardState, rd.Entries, rd.Snapshot, rd.MustSync); err != nil {
+
+			objSrcName := leader
+			if raftState == raft.StateLeader {
+				objSrcName = PeerID(0)
+			}
+
+			if err := rc.storage.Save(rd.HardState, rd.Entries, rd.Snapshot, objSrcName, rd.MustSync); err != nil {
 				return err
 			}
 			rc.transport.Send(rd.Messages)
-			if err := rc.applyEntries(node, rd.CommittedEntries); err != nil {
+			if err := rc.applyEntries(node, objSrcName, rd.CommittedEntries); err != nil {
 				return err
 			}
 			node.Advance(*rd)

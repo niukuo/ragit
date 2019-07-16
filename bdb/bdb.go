@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/logging"
 	ragit "github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
@@ -99,6 +100,7 @@ func (s *storage) Save(
 	state pb.HardState,
 	entries []pb.Entry,
 	snapshot pb.Snapshot,
+	objSrcNode ragit.PeerID,
 	sync bool) error {
 
 	if len(entries) > 0 {
@@ -124,10 +126,8 @@ func (s *storage) Save(
 		}
 
 		if !raft.IsEmptySnap(snapshot) {
-
-			refsMap, err := refs.DecodeSnapshot(snapshot.Data)
-			if err != nil {
-				return err
+			if objSrcNode == refs.PeerID(0) {
+				return errors.New("objSrcNode should not be zero when snapshot is not empty")
 			}
 
 			switch err := tx.DeleteBucket(BucketRefs); err {
@@ -135,10 +135,44 @@ func (s *storage) Save(
 			default:
 				return err
 			}
-
 			refsb, err := tx.CreateBucketIfNotExists(BucketRefs)
 			if err != nil {
 				return err
+			}
+
+			refsMap, err := refs.DecodeSnapshot(snapshot.Data)
+			if err != nil {
+				return err
+			}
+
+			if len(refsMap) > 0 {
+				err := s.listener.FetchObjects(refsMap, objSrcNode)
+				if err != nil {
+					return err
+				}
+				lastIndex, err := s.WALStorage.LastIndex()
+				if err != nil {
+					return fmt.Errorf("fail to get last index, err: %v", err)
+				}
+				if lastIndex < snapshot.Metadata.Index {
+					oplog := refs.Oplog{
+						ObjPack: snapshot.Data,
+						Params:  []string{"snapshot"},
+					}
+					oplogContent, err := proto.Marshal(&oplog)
+					if err != nil {
+						return fmt.Errorf("fail to marshal oplogConent, err: %v", err)
+					}
+					err = s.WALStorage.SaveWAL([]pb.Entry{{
+						Type:  pb.EntryNormal,
+						Index: snapshot.Metadata.Index,
+						Term:  snapshot.Metadata.Term,
+						Data:  oplogContent,
+					}}, true)
+					if err != nil {
+						return fmt.Errorf("save snapshot wal log, err: %v", err)
+					}
+				}
 			}
 
 			for name, hash := range refsMap {
@@ -159,7 +193,6 @@ func (s *storage) Save(
 				snapshot.Metadata.ConfState); err != nil {
 				return err
 			}
-
 		}
 
 		return nil
@@ -167,12 +200,10 @@ func (s *storage) Save(
 	}); err != nil {
 		return err
 	}
-
 	if !raft.IsEmptySnap(snapshot) {
 		s.indexMatched = true
 		s.appliedIndex = snapshot.Metadata.Index
 	}
-
 	return nil
 }
 
@@ -214,7 +245,7 @@ func (s *storage) UpdateConfState(term, index uint64, confState pb.ConfState) er
 	return nil
 }
 
-func (s *storage) Apply(term, index uint64, oplog refs.Oplog, retCh <-chan ragit.ApplyResult) error {
+func (s *storage) Apply(term, index uint64, oplog refs.Oplog, srcId ragit.PeerID, retCh <-chan ragit.ApplyResult) error {
 	if err := s.checkIndex(index); err != nil {
 		return err
 	}
@@ -307,6 +338,21 @@ func (s *storage) Apply(term, index uint64, oplog refs.Oplog, retCh <-chan ragit
 			if err := status.Error(); err != nil {
 				s.logger.Warning("refs not updated, err: ", err)
 				return err
+			}
+		} else if len(oplog.GetParams()) > 0 && oplog.GetParams()[0] == "snapshot" {
+			refsMap, err := refs.DecodeSnapshot(oplog.ObjPack)
+			if err != nil {
+				return err
+			}
+			if len(refsMap) > 0 {
+				if srcId == ragit.PeerID(0) {
+					err = s.listener.Reset(refsMap)
+				} else {
+					err = s.listener.FetchObjects(refsMap, srcId)
+				}
+				if err != nil {
+					return err
+				}
 			}
 		}
 

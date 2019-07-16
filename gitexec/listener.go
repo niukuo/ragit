@@ -214,3 +214,8 @@ func (l *listener) exec(name string, args ...string) error {
 
 	return nil
 }
+
+func (l *listener) FetchObjects(refs map[string]refs.Hash, nodeID refs.PeerID) error {
+	//TODO: POST $GIT_URL/git-upload-pack HTTP/1.0
+	return errors.New("not implemented")
+}

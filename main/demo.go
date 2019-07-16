@@ -14,6 +14,7 @@ import (
 	"github.com/niukuo/ragit/gitexec"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/raft"
+	etcdraft "go.etcd.io/etcd/raft"
 )
 
 func main() {
@@ -48,7 +49,19 @@ func main() {
 	}
 
 	// raft provides a commit stream for the proposals from the http api
-	node, err := raft.RunNode(myid, peers, storage)
+	c := raft.NewConfig()
+	c.Config = etcdraft.Config{
+		ID:                        uint64(myid),
+		ElectionTick:              10,
+		HeartbeatTick:             1,
+		Storage:                   storage,
+		MaxSizePerMsg:             1024 * 1024,
+		MaxInflightMsgs:           256,
+		MaxUncommittedEntriesSize: 1 << 30,
+		PreVote:                   true,
+	}
+
+	node, err := raft.RunNode(c, peers, storage)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -59,7 +72,7 @@ func main() {
 	mux.Handle("/raft/", nh)
 	mux.Handle("/debug/", http.DefaultServeMux)
 	mux.Handle("/refs/", api.NewHandler(storage, node))
-	mux.Handle("/repo.git/", http.StripPrefix("/repo.git", api.NewGitHandler("repo.git", storage, node)))
+	mux.Handle("/repo.git/", http.StripPrefix("/repo.git", api.NewGitHandler("repo.git", storage, node, logging.GetLogger("repo.git"))))
 
 	log.Fatalln(http.ListenAndServe(myid.Addr(), LogHandler(mux)))
 }
