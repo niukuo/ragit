@@ -37,10 +37,32 @@ type storage struct {
 	logger logging.Logger
 }
 
+type Options struct {
+	Listener refs.Listener
+
+	Logger logging.Logger
+
+	*WALOptions
+}
+
+func NewOptions() *Options {
+	o := &Options{
+		WALOptions: NewWALOptions(),
+	}
+	return o
+}
+
 func Open(path string,
-	listener refs.Listener,
-	logger logging.Logger) (Storage, error) {
-	wal, err := OpenWAL(path + "/wal")
+	opts *Options,
+) (Storage, error) {
+
+	walOpts := opts.WALOptions
+	if walOpts.Logger == nil {
+		walOpts = &*opts.WALOptions
+		walOpts.Logger = opts.Logger
+	}
+
+	wal, err := OpenWAL(path+"/wal", opts.WALOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -52,10 +74,10 @@ func Open(path string,
 
 	s := &storage{
 		WALStorage: wal,
-		listener:   listener,
+		listener:   opts.Listener,
 		db:         db,
 
-		logger: logger,
+		logger: opts.Logger,
 	}
 
 	return s, nil
@@ -342,6 +364,8 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 	}); err != nil && err != errSkip {
 		return err
 	}
+
+	s.WALStorage.SetSnapshotIndex(index)
 
 	return nil
 }

@@ -22,7 +22,9 @@ func TestDB(t *testing.T) {
 	suite.Run(t, dbtest.NewDBSuite(func() dbtest.Storage {
 		path := *flagDBPath
 		os.RemoveAll(path)
-		db, err := bdb.Open(path, nil, logging.GetLogger(""))
+		opts := bdb.NewOptions()
+		opts.Logger = logging.GetLogger("")
+		db, err := bdb.Open(path, opts)
 		s.NoError(err)
 
 		return db
@@ -34,7 +36,10 @@ func TestSM(t *testing.T) {
 	suite.Run(t, dbtest.NewSMSuite(func() dbtest.Storage {
 		path := *flagDBPath
 		os.RemoveAll(path)
-		db, err := bdb.Open(path, &emptyListener{}, logging.GetLogger(""))
+		opts := bdb.NewOptions()
+		opts.Listener = &emptyListener{}
+		opts.Logger = logging.GetLogger("")
+		db, err := bdb.Open(path, opts)
 		s.NoError(err)
 
 		return db

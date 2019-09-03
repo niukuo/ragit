@@ -43,7 +43,11 @@ func main() {
 		log.Fatalln(err)
 	}
 
-	storage, err := bdb.Open(dir, listener, logging.GetLogger(""))
+	opts := bdb.NewOptions()
+	opts.Listener = listener
+	opts.Logger = logging.GetLogger("")
+
+	storage, err := bdb.Open(dir, opts)
 	if err != nil {
 		log.Fatalln(err)
 	}

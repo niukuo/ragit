@@ -2,9 +2,12 @@ package bdb
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 
+	"github.com/niukuo/ragit/logging"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
@@ -15,15 +18,37 @@ import (
 type LdbWALStorage = *ldbWALStorage
 type ldbWALStorage struct {
 	db *leveldb.DB
+
+	snapshotIndex uint64
+	keepLogCount  uint64
+
+	logger logging.Logger
 }
 
-func OpenWAL(path string) (LdbWALStorage, error) {
-	db, err := leveldb.OpenFile(path, nil)
+type WALOptions struct {
+	KeepLogCount int
+	DBOptions    *opt.Options
+	Logger       logging.Logger
+}
+
+func NewWALOptions() *WALOptions {
+	o := &WALOptions{
+		KeepLogCount: 10000,
+	}
+	return o
+}
+
+func OpenWAL(path string, opts *WALOptions) (LdbWALStorage, error) {
+	db, err := leveldb.OpenFile(path, opts.DBOptions)
 	if err != nil {
 		return nil, err
 	}
 	s := &ldbWALStorage{
 		db: db,
+
+		keepLogCount: uint64(opts.KeepLogCount),
+
+		logger: opts.Logger,
 	}
 	return s, nil
 }
@@ -31,6 +56,10 @@ func OpenWAL(path string) (LdbWALStorage, error) {
 func (s *ldbWALStorage) Close() {
 	s.db.Close()
 	s.db = nil
+}
+
+func (s *ldbWALStorage) SetSnapshotIndex(index uint64) {
+	atomic.StoreUint64(&s.snapshotIndex, index)
 }
 
 func (s *ldbWALStorage) SaveWAL(ents []pb.Entry, sync bool) error {
@@ -56,32 +85,72 @@ func (s *ldbWALStorage) SaveWAL(ents []pb.Entry, sync bool) error {
 		wb.Put(id[:], content)
 	}
 
-	last, err := s.LastIndex()
-	if err != nil {
-		return err
-	}
+	it := s.db.NewIterator(nil, nil)
+	defer it.Release()
 
-	if last != 0 {
+	if !it.First() {
+		if err := it.Error(); err != nil {
+			return err
+		}
+	} else {
 		del := false
-		var delBegin uint64
+		var delBegin, delEnd uint64
+		// delete [begin, end)
+
+		first := binary.BigEndian.Uint64(it.Key())
+
+		if !it.Last() {
+			if err := it.Error(); err != nil {
+				return err
+			}
+			return errors.New("get first log failed?")
+		}
+		last := binary.BigEndian.Uint64(it.Key())
 
 		if last > ents[len(ents)-1].Index {
 			// delete [ents.back().Index+1, last]
 			del = true
 			delBegin = ents[len(ents)-1].Index + 1
+			delEnd = last + 1
 		} else if last < ents[0].Index-1 {
 			// delete [first-1, last]
-			first, err := s.FirstIndex()
-			if err != nil {
-				return err
-			}
 
 			del = true
-			delBegin = first - 1
+			delBegin = first
+			delEnd = last + 1
+		} else {
+			delBegin = first
+			delEnd = first
+
+			// increase delEnd
+			if delEnd+s.keepLogCount < last {
+				delEnd = last - s.keepLogCount
+			}
+
+			// limit max delete to 100
+			if delEnd > first+100 {
+				delEnd = first + 100
+			}
+
+			// keep log before snapshot
+			if snapshotIndex := atomic.LoadUint64(&s.snapshotIndex); snapshotIndex > s.keepLogCount &&
+				delEnd+s.keepLogCount > snapshotIndex {
+				delEnd = snapshotIndex - s.keepLogCount
+			}
+
+			if delEnd > delBegin {
+				del = true
+			}
+
 		}
 
 		if del {
-			for i := delBegin; i <= last; i++ {
+			s.logger.Infof("wal [%d, %d] appending [%d, %d], deleting [%d, %d)",
+				first, last,
+				ents[0].Index, ents[len(ents)-1].Index,
+				delBegin, delEnd,
+			)
+			for i := delBegin; i < delEnd; i++ {
 				var id [8]byte
 				binary.BigEndian.PutUint64(id[:], i)
 				wb.Delete(id[:])
