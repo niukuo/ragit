@@ -113,6 +113,7 @@ func (s *ldbWALStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 
 	size := int(hi - lo)
 	entries := make([]pb.Entry, 0, size)
+	var total uint64 = 0
 
 	for it.Next() {
 		id := binary.BigEndian.Uint64(it.Key())
@@ -122,11 +123,17 @@ func (s *ldbWALStorage) Entries(lo, hi, maxSize uint64) ([]pb.Entry, error) {
 		}
 
 		var entry pb.Entry
-		if err := entry.Unmarshal(it.Value()); err != nil {
+		b := it.Value()
+		if err := entry.Unmarshal(b); err != nil {
 			return nil, err
 		}
 
 		entries = append(entries, entry)
+
+		total += uint64(len(b))
+		if total >= maxSize {
+			break
+		}
 	}
 
 	if err := it.Error(); err != nil {
