@@ -41,6 +41,7 @@ func (s Status) MemberStatus() *MemberStatus {
 	mstatus := &MemberStatus{
 		ID:        PeerID(s.ID).String(),
 		Lead:      PeerID(s.Lead).String(),
+		Commit:    s.Commit,
 		RaftState: s.RaftState.String(),
 	}
 	mstatus.Progress = make(map[string]Tracker, 0)
@@ -67,6 +68,7 @@ type Tracker struct {
 type MemberStatus struct {
 	ID        string             `json:"id"`
 	Lead      string             `json:"lead"`
+	Commit    uint64             `json:"commit"`
 	RaftState string             `json:"raftState"`
 	Progress  map[string]Tracker `json:"progress"`
 }
