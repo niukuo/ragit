@@ -14,5 +14,8 @@ type Storage interface {
 	Apply(term, index uint64, oplog refs.Oplog, srcId PeerID, outCh <-chan ApplyResult) error
 	UpdateConfState(term, index uint64, confState pb.ConfState) error
 
+	OnLeaderStart(term uint64)
+	OnLeaderStop()
+
 	Close()
 }

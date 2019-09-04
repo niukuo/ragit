@@ -30,11 +30,20 @@ type termAndResult struct {
 	result <-chan applyResult
 }
 
+type expectedTerm struct{}
+
+var ExpectedTermKey = expectedTerm{}
+
+func WithExpectedTerm(ctx context.Context, term uint64) context.Context {
+	return context.WithValue(ctx, ExpectedTermKey, term)
+}
+
 type msgWithResult struct {
-	data  []byte
-	idxCh chan<- uint64
-	err   error
-	resCh <-chan applyResult
+	expectedTerm uint64
+	data         []byte
+	idxCh        chan<- uint64
+	err          error
+	resCh        <-chan applyResult
 }
 
 type ApplyResult = applyResult
@@ -302,8 +311,9 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 
 	var lastReady *raft.Ready
 	raftState := raft.StateFollower
-
+	var hardState pb.HardState
 	leader := PeerID(0)
+
 	for {
 		var rd *raft.Ready
 		if lastReady != nil {
@@ -318,10 +328,22 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 				rc.raftLogger.Info(fields...)
 			}
 
+			if !raft.IsEmptyHardState(rd.HardState) {
+				hardState = rd.HardState
+			}
+
 			if rd.SoftState != nil {
-				rc.eventLogger.Infof("soft state changed from %s to %s", raftState, rd.SoftState.RaftState)
+				from := raftState
+				to := rd.SoftState.RaftState
+				rc.eventLogger.Infof("soft state changed from %s to %s, term: %d",
+					raftState, rd.SoftState.RaftState, hardState.Term)
 				raftState = rd.SoftState.RaftState
 				leader = PeerID(rd.SoftState.Lead)
+				if from != raft.StateLeader && to == raft.StateLeader {
+					rc.storage.OnLeaderStart(hardState.Term)
+				} else if from == raft.StateLeader && to != raft.StateLeader {
+					rc.storage.OnLeaderStop()
+				}
 			}
 
 			objSrcName := leader
@@ -357,6 +379,13 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 				break
 			}
 
+			if msg.expectedTerm != 0 && msg.expectedTerm != hardState.Term {
+				err := fmt.Errorf("term not match, expected: %d, actual: %d",
+					msg.expectedTerm, hardState.Term)
+				reportErrToMsg(msg, err)
+				break
+			}
+
 			if err := node.Propose(msg.data); err != nil {
 				reportErrToMsg(msg, err)
 				break
@@ -382,6 +411,12 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 				term:   entry.Term,
 				result: msg.resCh,
 			})
+
+			if entry.Term != hardState.Term {
+				return fmt.Errorf("proposed term(%d) not equal to hardstate.term(%d)???",
+					entry.Term, hardState.Term)
+			}
+
 			msg.idxCh <- entry.Index
 
 		case err := <-rc.transport.ErrorC:
@@ -523,6 +558,10 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, w io.Writer) 
 		resCh: resCh,
 	}
 
+	if v := ctx.Value(ExpectedTermKey); v != nil {
+		msg.expectedTerm = v.(uint64)
+	}
+
 	select {
 	case rc.propC <- &msg:
 		defer func() { close(resCh) }()
@@ -557,7 +596,8 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, w io.Writer) 
 
 	done := make(chan struct{})
 
-	rc.eventLogger.Info("proposed, index: ", index, ", opcnt: ", len(oplog.Ops))
+	rc.eventLogger.Info("proposed, index: ", index, ", opcnt: ", len(oplog.Ops),
+		", expectedTerm: ", msg.expectedTerm)
 	select {
 	case resCh <- applyResult{
 		Writer: w,

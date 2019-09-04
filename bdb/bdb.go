@@ -445,6 +445,14 @@ func (s *storage) GetAllRefs() (map[string]refs.Hash, error) {
 	return ret, nil
 }
 
+func (s *storage) OnLeaderStart(term uint64) {
+	s.listener.OnLeaderStart(term)
+}
+
+func (s *storage) OnLeaderStop() {
+	s.listener.OnLeaderStop()
+}
+
 func getAllRefs(refsb *bbolt.Bucket, refsMap map[string]refs.Hash) error {
 	if refsb == nil {
 		return nil
