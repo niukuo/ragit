@@ -2,6 +2,7 @@ package gitexec
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -35,7 +36,7 @@ func NewListener(dir string, logger logging.Logger) (Listener, error) {
 	return l, nil
 }
 
-func (l *listener) Apply(oplog refs.Oplog, w io.Writer) error {
+func (l *listener) Apply(ctx context.Context, oplog refs.Oplog, w io.Writer) error {
 
 	cmd := exec.Command("git", "receive-pack", "--stateless-rpc", ".")
 	cmd.Dir = l.dir
@@ -218,4 +219,10 @@ func (l *listener) exec(name string, args ...string) error {
 func (l *listener) FetchObjects(refs map[string]refs.Hash, nodeID refs.PeerID) error {
 	//TODO: POST $GIT_URL/git-upload-pack HTTP/1.0
 	return errors.New("not implemented")
+}
+
+func (l *listener) OnLeaderStart(term uint64) {
+}
+
+func (l *listener) OnLeaderStop() {
 }

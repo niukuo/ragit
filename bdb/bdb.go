@@ -2,6 +2,7 @@ package bdb
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -245,7 +246,7 @@ func (s *storage) UpdateConfState(term, index uint64, confState pb.ConfState) er
 	return nil
 }
 
-func (s *storage) Apply(term, index uint64, oplog refs.Oplog, srcId ragit.PeerID, retCh <-chan ragit.ApplyResult) error {
+func (s *storage) Apply(ctx context.Context, term, index uint64, oplog refs.Oplog, srcId ragit.PeerID) error {
 	if err := s.checkIndex(index); err != nil {
 		return err
 	}
@@ -255,12 +256,8 @@ func (s *storage) Apply(term, index uint64, oplog refs.Oplog, srcId ragit.PeerID
 
 	var buf bytes.Buffer
 	var out io.Writer = &buf
-	if retCh != nil {
-		v, ok := <-retCh
-		if ok {
-			defer v.Close()
-			out = io.MultiWriter(&buf, v)
-		}
+	if v := ctx.Value(ragit.CtxWriterKey); v != nil {
+		out = io.MultiWriter(&buf, v.(io.Writer))
 	}
 
 	var errSkip = errors.New("check failed, skip")
@@ -323,7 +320,7 @@ func (s *storage) Apply(term, index uint64, oplog refs.Oplog, srcId ragit.PeerID
 		}
 
 		if len(oplog.Ops) > 0 {
-			if err = s.listener.Apply(oplog, out); err != nil {
+			if err = s.listener.Apply(ctx, oplog, out); err != nil {
 				refs.ReportError(out, err)
 				return err
 			}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -30,14 +29,6 @@ type termAndResult struct {
 	result <-chan applyResult
 }
 
-type expectedTerm struct{}
-
-var ExpectedTermKey = expectedTerm{}
-
-func WithExpectedTerm(ctx context.Context, term uint64) context.Context {
-	return context.WithValue(ctx, ExpectedTermKey, term)
-}
-
 type msgWithResult struct {
 	expectedTerm uint64
 	data         []byte
@@ -48,13 +39,8 @@ type msgWithResult struct {
 
 type ApplyResult = applyResult
 type applyResult struct {
-	io.Writer
-	done chan<- struct{}
-}
-
-func (r *applyResult) Close() error {
-	close(r.done)
-	return nil
+	context context.Context
+	done    chan<- error
 }
 
 // A key-value stream backed by raft
@@ -148,19 +134,12 @@ func RunNode(c Config, peers []PeerID, storage Storage) (Node, error) {
 	return rc, nil
 }
 
-func reportError(ch <-chan applyResult, err error) {
-	res, ok := <-ch
-	if !ok {
-		return
-	}
-	refs.ReportError(res.Writer, err)
-	close(res.done)
-}
-
 func reportErrToMsg(msg *msgWithResult, err error) {
 	msg.err = err
 	close(msg.idxCh)
-	reportError(msg.resCh, err)
+	if res, ok := <-msg.resCh; ok {
+		res.done <- err
+	}
 }
 
 // applyEntries writes committed log entries to commit channel and returns
@@ -168,51 +147,64 @@ func reportErrToMsg(msg *msgWithResult, err error) {
 func (rc *raftNode) applyEntries(node *raft.RawNode, srcId PeerID, ents []pb.Entry) error {
 	sm := rc.storage
 	for i := range ents {
-		entry := &ents[i]
-		v, ok := rc.doingRequest.Load(entry.Index)
-		var retCh <-chan applyResult
-		if ok {
-			tr := v.(termAndResult)
+		if err := rc.applyEntry(sm, node, srcId, &ents[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (rc *raftNode) applyEntry(sm Storage, node *raft.RawNode,
+	srcId PeerID, entry *pb.Entry) (err error) {
+	ctx := context.Background()
+	if v, ok := rc.doingRequest.Load(entry.Index); ok {
+		tr := v.(termAndResult)
+		if res, ok := <-tr.result; ok {
 			if tr.term != entry.Term {
-				reportError(tr.result, &errTermChanged{
+				res.done <- &errTermChanged{
 					proposedTerm:  tr.term,
 					committedTerm: entry.Term,
-				})
+				}
 			} else {
-				retCh = tr.result
-			}
-		}
-		switch entry.Type {
-		case pb.EntryNormal:
-			var oplog refs.Oplog
-			if err := proto.Unmarshal(entry.Data, &oplog); err != nil {
-				return err
-			}
-			if err := sm.Apply(entry.Term, entry.Index, oplog, srcId, retCh); err != nil {
-				return err
-			}
-
-		case pb.EntryConfChange:
-			var cc pb.ConfChange
-			if err := cc.Unmarshal(entry.Data); err != nil {
-				return err
-			}
-			if err := sm.UpdateConfState(entry.Term, entry.Index,
-				*node.ApplyConfChange(cc)); err != nil {
-				return err
-			}
-			switch cc.Type {
-			case pb.ConfChangeAddNode:
-				if cc.NodeID != uint64(rc.id) {
-					rc.transport.AddPeer(types.ID(cc.NodeID), []string{"http://" + PeerID(cc.NodeID).Addr()})
-				}
-			case pb.ConfChangeRemoveNode:
-				if cc.NodeID != uint64(rc.id) && rc.transport.Get(types.ID(cc.NodeID)) != nil {
-					rc.transport.RemovePeer(types.ID(cc.NodeID))
-				}
+				ctx = res.context
+				defer func() {
+					res.done <- err
+				}()
 			}
 		}
 	}
+
+	switch entry.Type {
+	case pb.EntryNormal:
+		var oplog refs.Oplog
+		if err := proto.Unmarshal(entry.Data, &oplog); err != nil {
+			return err
+		}
+		if err := sm.Apply(ctx, entry.Term, entry.Index, oplog, srcId); err != nil {
+			return err
+		}
+
+	case pb.EntryConfChange:
+		var cc pb.ConfChange
+		if err := cc.Unmarshal(entry.Data); err != nil {
+			return err
+		}
+		if err := sm.UpdateConfState(entry.Term, entry.Index,
+			*node.ApplyConfChange(cc)); err != nil {
+			return err
+		}
+		switch cc.Type {
+		case pb.ConfChangeAddNode:
+			if cc.NodeID != uint64(rc.id) {
+				rc.transport.AddPeer(types.ID(cc.NodeID), []string{"http://" + PeerID(cc.NodeID).Addr()})
+			}
+		case pb.ConfChangeRemoveNode:
+			if cc.NodeID != uint64(rc.id) && rc.transport.Get(types.ID(cc.NodeID)) != nil {
+				rc.transport.RemovePeer(types.ID(cc.NodeID))
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -539,7 +531,7 @@ func (rc *raftNode) getStatus(w http.ResponseWriter, r *http.Request) {
 	encoder.Encode(status)
 }
 
-func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, w io.Writer) error {
+func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 	if err := refs.Validate(oplog); err != nil {
 		return err
 	}
@@ -550,7 +542,7 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, w io.Writer) 
 	}
 
 	idxCh := make(chan uint64, 1)
-	resCh := make(chan applyResult)
+	resCh := make(chan applyResult) // must no buffer
 
 	msg := msgWithResult{
 		data:  content,
@@ -558,7 +550,7 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, w io.Writer) 
 		resCh: resCh,
 	}
 
-	if v := ctx.Value(ExpectedTermKey); v != nil {
+	if v := ctx.Value(CtxExpectedTermKey); v != nil {
 		msg.expectedTerm = v.(uint64)
 	}
 
@@ -594,17 +586,16 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, w io.Writer) 
 		return ErrStopped
 	}
 
-	done := make(chan struct{})
+	done := make(chan error)
 
 	rc.eventLogger.Info("proposed, index: ", index, ", opcnt: ", len(oplog.Ops),
 		", expectedTerm: ", msg.expectedTerm)
 	select {
 	case resCh <- applyResult{
-		Writer: w,
-		done:   done,
+		context: ctx,
+		done:    done,
 	}:
-		<-done
-		return nil
+		return <-done
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-rc.raftDoneC:

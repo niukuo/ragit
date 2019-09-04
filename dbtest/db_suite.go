@@ -1,6 +1,8 @@
 package dbtest
 
 import (
+	"context"
+
 	"github.com/golang/protobuf/proto"
 	ragit "github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
@@ -178,8 +180,8 @@ func (s *DBSuite) TestApply() {
 		},
 	}
 
-	s.Error(s.db.Apply(1, 2, opAdd, ragit.PeerID(0), nil))
-	s.NoError(s.db.Apply(2, 1, opAdd, ragit.PeerID(0), nil))
+	s.Error(s.db.Apply(context.Background(), 1, 2, opAdd, ragit.PeerID(0)))
+	s.NoError(s.db.Apply(context.Background(), 2, 1, opAdd, ragit.PeerID(0)))
 
 	snapshot, err = s.db.Snapshot()
 	s.NoError(err)
@@ -191,8 +193,8 @@ func (s *DBSuite) TestApply() {
 3132333435363738393061626364656631323334 refs/heads/master
 `, string(snapshot.Data))
 
-	s.Error(s.db.Apply(3, 1, opUpdateRemove, ragit.PeerID(0), nil))
-	s.NoError(s.db.Apply(3, 2, opUpdateRemove, ragit.PeerID(0), nil))
+	s.Error(s.db.Apply(context.Background(), 3, 1, opUpdateRemove, ragit.PeerID(0)))
+	s.NoError(s.db.Apply(context.Background(), 3, 2, opUpdateRemove, ragit.PeerID(0)))
 
 	snapshot, err = s.db.Snapshot()
 	s.NoError(err)

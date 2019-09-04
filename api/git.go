@@ -199,7 +199,7 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		oplog.Ops = append(oplog.Ops, op)
 	}
 
-	if err := h.node.Propose(r.Context(), oplog, w); err != nil {
+	if err := h.node.Propose(raft.WithResponseWriter(r.Context(), w), oplog); err != nil {
 		reportError(w, err, http.StatusBadRequest)
 		return
 	}
