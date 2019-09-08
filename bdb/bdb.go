@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/logging"
 	ragit "github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
@@ -27,10 +27,8 @@ var (
 type Storage = *storage
 type storage struct {
 	WALStorage
-	listener     refs.Listener
-	db           *bbolt.DB
-	indexMatched bool
-	appliedIndex uint64
+	listener refs.Listener
+	db       *bbolt.DB
 
 	logger logging.Logger
 }
@@ -66,6 +64,12 @@ func (s *storage) Close() {
 	s.WALStorage = nil
 }
 
+func getUint64(b *bbolt.Bucket, out map[string]*uint64) {
+	for k, v := range out {
+		*v = binary.BigEndian.Uint64(b.Get([]byte(k)))
+	}
+}
+
 func putUint64(b *bbolt.Bucket, data map[string]uint64) error {
 	for k, v := range data {
 		var buf [8]byte
@@ -77,10 +81,10 @@ func putUint64(b *bbolt.Bucket, data map[string]uint64) error {
 	return nil
 }
 
-func saveMeta(b *bbolt.Bucket, term, index uint64, confState pb.ConfState) error {
+func saveConfState(b *bbolt.Bucket, term, index uint64, confState pb.ConfState) error {
 	if err := putUint64(b, map[string]uint64{
-		"term":  term,
-		"index": index,
+		"term":       term,
+		"conf_index": index,
 	}); err != nil {
 		return err
 	}
@@ -100,8 +104,6 @@ func saveMeta(b *bbolt.Bucket, term, index uint64, confState pb.ConfState) error
 func (s *storage) Save(
 	state pb.HardState,
 	entries []pb.Entry,
-	snapshot pb.Snapshot,
-	objSrcNode ragit.PeerID,
 	sync bool) error {
 
 	if len(entries) > 0 {
@@ -110,13 +112,10 @@ func (s *storage) Save(
 		}
 	}
 
-	if err := s.db.Update(func(tx *bbolt.Tx) error {
+	if !raft.IsEmptyHardState(state) {
+		if err := s.db.Update(func(tx *bbolt.Tx) error {
 
-		if !raft.IsEmptyHardState(state) {
-			b, err := tx.CreateBucketIfNotExists(BucketState)
-			if err != nil {
-				return err
-			}
+			b := tx.Bucket(BucketState)
 			if err := putUint64(b, map[string]uint64{
 				"term":   state.Term,
 				"vote":   state.Vote,
@@ -124,114 +123,123 @@ func (s *storage) Save(
 			}); err != nil {
 				return err
 			}
+
+			return nil
+		}); err != nil {
+			return err
 		}
+	}
 
-		if !raft.IsEmptySnap(snapshot) {
-			if objSrcNode == refs.PeerID(0) {
-				return errors.New("objSrcNode should not be zero when snapshot is not empty")
-			}
+	return nil
+}
 
-			switch err := tx.DeleteBucket(BucketRefs); err {
-			case nil, bbolt.ErrBucketNotFound:
-			default:
-				return err
-			}
-			refsb, err := tx.CreateBucketIfNotExists(BucketRefs)
-			if err != nil {
-				return err
-			}
+func (s *storage) OnStart() error {
 
-			refsMap, err := refs.DecodeSnapshot(snapshot.Data)
-			if err != nil {
-				return err
-			}
+	refsMap := make(map[string]refs.Hash)
 
-			if len(refsMap) > 0 {
-				err := s.listener.FetchObjects(refsMap, objSrcNode)
-				if err != nil {
-					return err
-				}
-				lastIndex, err := s.WALStorage.LastIndex()
-				if err != nil {
-					return fmt.Errorf("fail to get last index, err: %v", err)
-				}
-				if lastIndex < snapshot.Metadata.Index {
-					oplog := refs.Oplog{
-						ObjPack: snapshot.Data,
-						Params:  []string{"snapshot"},
-					}
-					oplogContent, err := proto.Marshal(&oplog)
-					if err != nil {
-						return fmt.Errorf("fail to marshal oplogConent, err: %v", err)
-					}
-					err = s.WALStorage.SaveWAL([]pb.Entry{{
-						Type:  pb.EntryNormal,
-						Index: snapshot.Metadata.Index,
-						Term:  snapshot.Metadata.Term,
-						Data:  oplogContent,
-					}}, true)
-					if err != nil {
-						return fmt.Errorf("save snapshot wal log, err: %v", err)
-					}
-				}
-			}
-
-			for name, hash := range refsMap {
-				hash := hash
-				if err := refsb.Put([]byte(name), hash[:]); err != nil {
-					return err
-				}
-			}
-
-			metab, err := tx.CreateBucketIfNotExists(BucketMeta)
-			if err != nil {
-				return err
-			}
-
-			if err := saveMeta(metab,
-				snapshot.Metadata.Term,
-				snapshot.Metadata.Index,
-				snapshot.Metadata.ConfState); err != nil {
-				return err
-			}
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		refsb := tx.Bucket(BucketRefs)
+		if err := getAllRefs(refsb, refsMap); err != nil {
+			return err
 		}
-
 		return nil
-
 	}); err != nil {
 		return err
 	}
-	if !raft.IsEmptySnap(snapshot) {
-		s.indexMatched = true
-		s.appliedIndex = snapshot.Metadata.Index
-	}
-	return nil
-}
 
-func (s *storage) checkIndex(index uint64) error {
-	if index > s.appliedIndex+1 || s.indexMatched && index <= s.appliedIndex {
-		return fmt.Errorf("index gap, expected: %v, actual: %v",
-			s.appliedIndex+1, index)
-	}
-	return nil
-}
-
-func (s *storage) UpdateConfState(term, index uint64, confState pb.ConfState) error {
-
-	if err := s.checkIndex(index); err != nil {
+	if err := s.listener.Check(refsMap); err != nil {
 		return err
 	}
-	if !s.indexMatched && index <= s.appliedIndex {
-		return nil
+
+	return nil
+}
+
+func (s *storage) OnSnapshot(
+	snapshot pb.Snapshot,
+	objSrcNode ragit.PeerID,
+) error {
+
+	if objSrcNode == refs.PeerID(0) {
+		return errors.New("objSrcNode should not be zero when saving snapshot")
 	}
 
+	refsMap, err := refs.DecodeSnapshot(snapshot.Data)
+	if err != nil {
+		return err
+	}
+
+	peers := make([]ragit.PeerID, 0, len(snapshot.Metadata.ConfState.Nodes))
+	for _, peer := range snapshot.Metadata.ConfState.Nodes {
+		peers = append(peers, ragit.PeerID(peer))
+	}
+
+	s.logger.Info("saving snapshot from ", objSrcNode,
+		", term: ", snapshot.Metadata.Term,
+		", index: ", snapshot.Metadata.Index,
+		", peers: ", peers)
+
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
-		metab, err := tx.CreateBucketIfNotExists(BucketMeta)
+
+		switch err := tx.DeleteBucket(BucketRefs); err {
+		case nil, bbolt.ErrBucketNotFound:
+		default:
+			return err
+		}
+		refsb, err := tx.CreateBucket(BucketRefs)
 		if err != nil {
 			return err
 		}
 
-		if err := saveMeta(metab, term, index, confState); err != nil {
+		for name, hash := range refsMap {
+			hash := hash
+			if err := refsb.Put([]byte(name), hash[:]); err != nil {
+				return err
+			}
+		}
+
+		metab := tx.Bucket(BucketMeta)
+		if err := saveConfState(metab,
+			snapshot.Metadata.Term,
+			snapshot.Metadata.Index,
+			snapshot.Metadata.ConfState); err != nil {
+			return err
+		}
+
+		if err := putUint64(metab, map[string]uint64{
+			"index": snapshot.Metadata.Index,
+		}); err != nil {
+			return err
+		}
+
+		if err := s.listener.FetchObjects(refsMap, objSrcNode); err != nil {
+			return err
+		}
+
+		if err := s.WALStorage.SaveWAL([]pb.Entry{{
+			Type:  pb.EntryNormal,
+			Index: snapshot.Metadata.Index,
+			Term:  snapshot.Metadata.Term,
+			Data: append([]byte(fmt.Sprintf("snapshot from %s: ", objSrcNode)),
+				snapshot.Data...),
+		}}, true); err != nil {
+			return fmt.Errorf("save snapshot wal log, err: %v", err)
+		}
+
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
+func (s *storage) OnConfState(term, index uint64, confState pb.ConfState) error {
+
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+
+		metab := tx.Bucket(BucketMeta)
+		if err := saveConfState(metab, term, index, confState); err != nil {
 			return err
 		}
 
@@ -240,19 +248,10 @@ func (s *storage) UpdateConfState(term, index uint64, confState pb.ConfState) er
 		return err
 	}
 
-	s.indexMatched = true
-	s.appliedIndex = index
-
 	return nil
 }
 
-func (s *storage) Apply(ctx context.Context, term, index uint64, oplog refs.Oplog, srcId ragit.PeerID) error {
-	if err := s.checkIndex(index); err != nil {
-		return err
-	}
-	if !s.indexMatched && index <= s.appliedIndex {
-		return nil
-	}
+func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Oplog) error {
 
 	var buf bytes.Buffer
 	var out io.Writer = &buf
@@ -263,10 +262,7 @@ func (s *storage) Apply(ctx context.Context, term, index uint64, oplog refs.Oplo
 	var errSkip = errors.New("check failed, skip")
 
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
-		metab, err := tx.CreateBucketIfNotExists(BucketMeta)
-		if err != nil {
-			return err
-		}
+		metab := tx.Bucket(BucketMeta)
 		if err := putUint64(metab, map[string]uint64{
 			"term":  term,
 			"index": index,
@@ -336,30 +332,12 @@ func (s *storage) Apply(ctx context.Context, term, index uint64, oplog refs.Oplo
 				s.logger.Warning("refs not updated, err: ", err)
 				return err
 			}
-		} else if len(oplog.GetParams()) > 0 && oplog.GetParams()[0] == "snapshot" {
-			refsMap, err := refs.DecodeSnapshot(oplog.ObjPack)
-			if err != nil {
-				return err
-			}
-			if len(refsMap) > 0 {
-				if srcId == ragit.PeerID(0) {
-					err = s.listener.Reset(refsMap)
-				} else {
-					err = s.listener.FetchObjects(refsMap, srcId)
-				}
-				if err != nil {
-					return err
-				}
-			}
 		}
 
 		return nil
 	}); err != nil && err != errSkip {
 		return err
 	}
-
-	s.indexMatched = true
-	s.appliedIndex = index
 
 	return nil
 }
@@ -368,28 +346,20 @@ func (s *storage) InitialState() (pb.HardState, pb.ConfState, error) {
 	var (
 		hardState pb.HardState
 		confState pb.ConfState
-		refsMap   = make(map[string]refs.Hash)
 	)
 
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		stateb := tx.Bucket(BucketState)
-		if stateb != nil {
-			hardState.Term = binary.BigEndian.Uint64(stateb.Get([]byte("term")))
-			hardState.Vote = binary.BigEndian.Uint64(stateb.Get([]byte("vote")))
-			hardState.Commit = binary.BigEndian.Uint64(stateb.Get([]byte("commit")))
-		}
-
-		refsb := tx.Bucket(BucketRefs)
-		if err := getAllRefs(refsb, refsMap); err != nil {
-			return err
-		}
+		getUint64(stateb, map[string]*uint64{
+			"term":   &hardState.Term,
+			"vote":   &hardState.Vote,
+			"commit": &hardState.Commit,
+		})
 
 		metab := tx.Bucket(BucketMeta)
-		if metab != nil {
-			if err := confState.Unmarshal(metab.Get([]byte("conf_state"))); err != nil {
-				return err
-			}
-			s.appliedIndex = binary.BigEndian.Uint64(metab.Get([]byte("index")))
+		if err := confState.Unmarshal(
+			metab.Get([]byte("conf_state"))); err != nil {
+			return err
 		}
 
 		return nil
@@ -397,11 +367,136 @@ func (s *storage) InitialState() (pb.HardState, pb.ConfState, error) {
 		return hardState, confState, err
 	}
 
-	if err := s.listener.Reset(refsMap); err != nil {
-		return hardState, confState, err
+	return hardState, confState, nil
+}
+
+func (s *storage) initBucket(
+	metab *bbolt.Bucket,
+	stateb *bbolt.Bucket,
+	peers []refs.PeerID) error {
+
+	if len(peers) > 0 {
+		s.logger.Info("bootstraping using ", peers)
+		var confState pb.ConfState
+		for _, peer := range peers {
+			confState.Nodes = append(confState.Nodes, uint64(peer))
+		}
+
+		data, err := confState.Marshal()
+		if err != nil {
+			return err
+		}
+
+		if err := putUint64(metab, map[string]uint64{
+			"term":       1,
+			"index":      1,
+			"conf_index": 1,
+		}); err != nil {
+			return err
+		}
+
+		if err := metab.Put([]byte("conf_state"), data); err != nil {
+			return err
+		}
+
+		if err := putUint64(stateb, map[string]uint64{
+			"term":   1,
+			"commit": 1,
+			"vote":   0,
+		}); err != nil {
+			return err
+		}
+
+		if err := s.SaveWAL([]pb.Entry{{
+			Term:  1,
+			Index: 1,
+			Type:  pb.EntryNormal,
+			Data:  []byte(fmt.Sprintf("bootstrap %v", peers)),
+		}}, true); err != nil {
+			return err
+		}
+
+		return nil
 	}
 
-	return hardState, confState, nil
+	if err := putUint64(metab, map[string]uint64{
+		"term":       0,
+		"index":      0,
+		"conf_index": 0,
+	}); err != nil {
+		return err
+	}
+
+	if err := putUint64(stateb, map[string]uint64{
+		"term":   0,
+		"commit": 0,
+		"vote":   0,
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *storage) GetOrInitState(peers []refs.PeerID) (*ragit.InitialState, error) {
+
+	var state ragit.InitialState
+
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		metab, err := tx.CreateBucket(BucketMeta)
+		var stateb *bbolt.Bucket
+		switch err {
+		case nil:
+			stateb, err = tx.CreateBucket(BucketState)
+			if err != nil {
+				return err
+			}
+			if err := s.initBucket(metab, stateb, peers); err != nil {
+				return err
+			}
+		case bbolt.ErrBucketExists:
+			metab = tx.Bucket(BucketMeta)
+			if v := metab.Get([]byte("conf_index")); v == nil {
+				idx := binary.BigEndian.Uint64(metab.Get([]byte("index")))
+				s.logger.Warning("filling conf_index to ", idx)
+				if err := putUint64(metab, map[string]uint64{
+					"conf_index": idx,
+				}); err != nil {
+					return err
+				}
+			}
+			stateb = tx.Bucket(BucketState)
+		default:
+			return err
+		}
+		var confState pb.ConfState
+		if err := confState.Unmarshal(
+			metab.Get([]byte("conf_state"))); err != nil {
+			return err
+		}
+		peers = make([]refs.PeerID, 0, len(confState.Nodes))
+		for _, peer := range confState.Nodes {
+			peers = append(peers, refs.PeerID(peer))
+		}
+		state.Peers = peers
+		getUint64(metab, map[string]*uint64{
+			"conf_index": &state.ConfIndex,
+			"index":      &state.AppliedIndex,
+		})
+
+		stateb = tx.Bucket(BucketState)
+		getUint64(stateb, map[string]*uint64{
+			"term":   &state.HardState.Term,
+			"vote":   &state.HardState.Vote,
+			"commit": &state.HardState.Commit,
+		})
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return &state, nil
 }
 
 func (s *storage) Snapshot() (pb.Snapshot, error) {
@@ -409,13 +504,14 @@ func (s *storage) Snapshot() (pb.Snapshot, error) {
 
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		metab := tx.Bucket(BucketMeta)
-		if metab != nil {
-			if err := snapshot.Metadata.ConfState.Unmarshal(metab.Get([]byte("conf_state"))); err != nil {
-				return err
-			}
-			snapshot.Metadata.Term = binary.BigEndian.Uint64(metab.Get([]byte("term")))
-			snapshot.Metadata.Index = binary.BigEndian.Uint64(metab.Get([]byte("index")))
+		if err := snapshot.Metadata.ConfState.Unmarshal(
+			metab.Get([]byte("conf_state"))); err != nil {
+			return err
 		}
+		getUint64(metab, map[string]*uint64{
+			"term":  &snapshot.Metadata.Term,
+			"index": &snapshot.Metadata.Index,
+		})
 		refsb := tx.Bucket(BucketRefs)
 		if refsb != nil {
 			refsMap := make(map[string]refs.Hash)
@@ -448,6 +544,63 @@ func (s *storage) OnLeaderStart(term uint64) {
 
 func (s *storage) OnLeaderStop() {
 	s.listener.OnLeaderStop()
+}
+
+func (s *storage) Describe(w io.Writer) {
+
+	fmt.Fprintln(w, "\nstorage:")
+
+	s.WALStorage.Describe(w)
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		stateb := tx.Bucket(BucketState)
+		{
+			var term, vote, commit uint64
+			getUint64(stateb, map[string]*uint64{
+				"term":   &term,
+				"vote":   &vote,
+				"commit": &commit,
+			})
+			fmt.Fprintln(w, "term:", term)
+			fmt.Fprintln(w, "vote:", ragit.PeerID(vote))
+			fmt.Fprintln(w, "committed_index:", commit)
+		}
+
+		metab := tx.Bucket(BucketMeta)
+		{
+			var term, index, confIndex uint64
+			getUint64(metab, map[string]*uint64{
+				"term":       &term,
+				"index":      &index,
+				"conf_index": &confIndex,
+			})
+			fmt.Fprintln(w, "disk_conf_index:", confIndex)
+
+			var confState pb.ConfState
+			if err := confState.Unmarshal(metab.Get([]byte("conf_state"))); err != nil {
+				return err
+			}
+
+			peers := confState.Nodes
+			fmt.Fprint(w, "peers: [")
+			sort.Slice(peers, func(i, j int) bool {
+				return peers[i] < peers[j]
+			})
+			for i, peer := range peers {
+				if i != 0 {
+					fmt.Fprint(w, " ")
+				}
+				fmt.Fprint(w, ragit.PeerID(peer))
+			}
+			fmt.Fprintln(w, "]")
+
+			fmt.Fprintln(w, "snapshot_term:", term)
+			fmt.Fprintln(w, "snapshot_index:", index)
+		}
+
+		return nil
+	}); err != nil {
+		fmt.Fprintln(w, "failed: ", err)
+	}
 }
 
 func getAllRefs(refsb *bbolt.Bucket, refsMap map[string]refs.Hash) error {

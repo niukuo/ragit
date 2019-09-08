@@ -1,8 +1,13 @@
 package bdb
 
-import pb "go.etcd.io/etcd/raft/raftpb"
+import (
+	"io"
+
+	pb "go.etcd.io/etcd/raft/raftpb"
+)
 
 type WALStorage interface {
+	Describe(w io.Writer)
 	SaveWAL(ents []pb.Entry, sync bool) error
 	Entries(lo, hi, maxSize uint64) ([]pb.Entry, error)
 	Term(i uint64) (uint64, error)

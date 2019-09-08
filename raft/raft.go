@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/logging"
@@ -18,16 +20,10 @@ import (
 	"go.etcd.io/etcd/pkg/types"
 	"go.etcd.io/etcd/raft"
 	pb "go.etcd.io/etcd/raft/raftpb"
-
 	"go.uber.org/zap"
 )
 
 var ErrStopped = errors.New("stopped")
-
-type termAndResult struct {
-	term   uint64
-	result <-chan applyResult
-}
 
 type msgWithResult struct {
 	expectedTerm uint64
@@ -37,7 +33,6 @@ type msgWithResult struct {
 	resCh        <-chan applyResult
 }
 
-type ApplyResult = applyResult
 type applyResult struct {
 	context context.Context
 	done    chan<- error
@@ -56,9 +51,14 @@ type raftNode struct {
 
 	lastWAL uint64
 	// raft backing for the commit/error channel
-	storage Storage
+	storage   Storage
+	executor  Executor
+	softState unsafe.Pointer
 
-	transport  *rafthttp.Transport
+	transport   *rafthttp.Transport
+	serverStats *stats.ServerStats
+	leaderStats *stats.LeaderStats
+
 	stopC      chan struct{} // signals proposal channel closed
 	raftResult error
 	raftDoneC  chan struct{}
@@ -67,12 +67,7 @@ type raftNode struct {
 	eventLogger logging.Logger
 }
 
-// newRaftNode initiates a raft instance and returns a committed log entry
-// channel and error channel. Proposals for log updates are sent over the
-// provided the proposal channel. All log entries are replayed over the
-// commit channel, followed by a nil message (to indicate the channel is
-// current), then new log entries. To shutdown, close proposeC and read errorC.
-func RunNode(c Config, peers []PeerID, storage Storage) (Node, error) {
+func RunNode(c Config, peers []PeerID) (Node, error) {
 
 	rpeers := make([]raft.Peer, 0, len(peers))
 	for _, peer := range peers {
@@ -80,11 +75,18 @@ func RunNode(c Config, peers []PeerID, storage Storage) (Node, error) {
 	}
 
 	id := PeerID(c.ID)
-	if c.Storage == nil {
-		c.Storage = storage
+
+	state, err := c.Storage.GetOrInitState(peers)
+	if err != nil {
+		return nil, err
 	}
 
-	node, err := raft.NewRawNode(&c.Config, rpeers)
+	lastWAL, err := c.Storage.LastIndex()
+	if err != nil {
+		return nil, err
+	}
+
+	node, err := raft.NewRawNode(&c.Config, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +97,12 @@ func RunNode(c Config, peers []PeerID, storage Storage) (Node, error) {
 		propC:       make(chan *msgWithResult),
 		funcC:       make(chan func(node *raft.RawNode)),
 
-		storage: storage,
+		lastWAL: lastWAL,
+
+		storage: c.Storage,
+
+		serverStats: stats.NewServerStats(id.String(), id.String()),
+		leaderStats: stats.NewLeaderStats(id.String()),
 
 		stopC:     make(chan struct{}),
 		raftDoneC: make(chan struct{}),
@@ -104,33 +111,34 @@ func RunNode(c Config, peers []PeerID, storage Storage) (Node, error) {
 		eventLogger: logging.GetLogger("event"),
 	}
 
-	lastWAL, err := storage.LastIndex()
-	if err != nil {
-		return nil, err
-	}
-	rc.lastWAL = lastWAL
-
 	transport := &rafthttp.Transport{
 		Logger:      zap.NewNop(),
 		ID:          types.ID(id),
+		URLs:        types.MustNewURLs([]string{"http://" + id.Addr()}),
 		ClusterID:   c.ClusterID,
 		Raft:        rc,
-		ServerStats: stats.NewServerStats("", ""),
-		LeaderStats: stats.NewLeaderStats(id.String()),
+		ServerStats: rc.serverStats,
+		LeaderStats: rc.leaderStats,
 		ErrorC:      make(chan error),
 	}
 
-	if err := transport.Start(); err != nil {
-		return nil, err
-	}
-
-	for _, peerid := range peers {
-		if peerid != id {
-			transport.AddPeer(types.ID(peerid), []string{"http://" + peerid.Addr()})
-		}
-	}
+	executor := NewExecutor(id,
+		node, transport, c.StateMachine,
+		logging.GetLogger("executor"))
 
 	rc.transport = transport
+	rc.executor = executor
+
+	rc.raftLogger.Info("starting raft instance, applied_index: ", state.AppliedIndex,
+		", committed_index: ", state.HardState.Commit,
+		", conf_index: ", state.ConfIndex,
+		", nodes: ", state.Peers)
+
+	if err := rc.executor.Start(
+		state.ConfIndex, state.AppliedIndex, state.Peers,
+	); err != nil {
+		return nil, err
+	}
 
 	go func() {
 		err := rc.serveRaft(node, c.TickDuration)
@@ -151,67 +159,13 @@ func reportErrToMsg(msg *msgWithResult, err error) {
 
 // applyEntries writes committed log entries to commit channel and returns
 // whether all entries could be published.
-func (rc *raftNode) applyEntries(node *raft.RawNode, srcId PeerID, ents []pb.Entry) error {
-	sm := rc.storage
+func (rc *raftNode) applyEntries(node *raft.RawNode, ents []pb.Entry) error {
 	for i := range ents {
-		if err := rc.applyEntry(sm, node, srcId, &ents[i]); err != nil {
+		entry := &ents[i]
+		if err := rc.executor.AppendEntry(entry); err != nil {
 			return err
 		}
 	}
-	return nil
-}
-
-func (rc *raftNode) applyEntry(sm Storage, node *raft.RawNode,
-	srcId PeerID, entry *pb.Entry) (err error) {
-	ctx := context.Background()
-	if v, ok := rc.doingRequest.Load(entry.Index); ok {
-		tr := v.(termAndResult)
-		if res, ok := <-tr.result; ok {
-			if tr.term != entry.Term {
-				res.done <- &errTermChanged{
-					proposedTerm:  tr.term,
-					committedTerm: entry.Term,
-				}
-			} else {
-				ctx = res.context
-				defer func() {
-					res.done <- err
-				}()
-			}
-		}
-	}
-
-	switch entry.Type {
-	case pb.EntryNormal:
-		var oplog refs.Oplog
-		if err := proto.Unmarshal(entry.Data, &oplog); err != nil {
-			return err
-		}
-		if err := sm.Apply(ctx, entry.Term, entry.Index, oplog, srcId); err != nil {
-			return err
-		}
-
-	case pb.EntryConfChange:
-		var cc pb.ConfChange
-		if err := cc.Unmarshal(entry.Data); err != nil {
-			return err
-		}
-		if err := sm.UpdateConfState(entry.Term, entry.Index,
-			*node.ApplyConfChange(cc)); err != nil {
-			return err
-		}
-		switch cc.Type {
-		case pb.ConfChangeAddNode:
-			if cc.NodeID != uint64(rc.id) {
-				rc.transport.AddPeer(types.ID(cc.NodeID), []string{"http://" + PeerID(cc.NodeID).Addr()})
-			}
-		case pb.ConfChangeRemoveNode:
-			if cc.NodeID != uint64(rc.id) && rc.transport.Get(types.ID(cc.NodeID)) != nil {
-				rc.transport.RemovePeer(types.ID(cc.NodeID))
-			}
-		}
-	}
-
 	return nil
 }
 
@@ -219,8 +173,12 @@ func (rc *raftNode) applyEntry(sm Storage, node *raft.RawNode,
 func (rc *raftNode) Stop() error {
 	close(rc.stopC)
 	rc.transport.Stop()
+	err := rc.executor.Stop()
 	<-rc.raftDoneC
-	return rc.raftResult
+	if e := rc.raftResult; e != nil {
+		err = e
+	}
+	return err
 }
 
 var snapshotCatchUpEntriesN uint64 = 10000
@@ -261,7 +219,7 @@ func readyForLogger(rd *raft.Ready) []interface{} {
 	if !raft.IsEmptySnap(rd.Snapshot) {
 		logFields = append(logFields,
 			", Snapshot: ",
-			rd.Snapshot.Metadata,
+			(*Snapshot)(&rd.Snapshot),
 		)
 	}
 
@@ -332,6 +290,7 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 			}
 
 			if rd.SoftState != nil {
+				atomic.StorePointer(&rc.softState, unsafe.Pointer(rd.SoftState))
 				from := raftState
 				to := rd.SoftState.RaftState
 				rc.eventLogger.Infof("soft state changed from %s to %s, term: %d",
@@ -339,25 +298,34 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 				raftState = rd.SoftState.RaftState
 				leader = PeerID(rd.SoftState.Lead)
 				if from != raft.StateLeader && to == raft.StateLeader {
-					rc.storage.OnLeaderStart(hardState.Term)
+					rc.executor.OnLeaderStart(hardState.Term)
 				} else if from == raft.StateLeader && to != raft.StateLeader {
-					rc.storage.OnLeaderStop()
+					rc.executor.OnLeaderStop()
 				}
 			}
 
-			objSrcName := leader
-			if raftState == raft.StateLeader {
-				objSrcName = PeerID(0)
+			// save snapshot first. if HardState.Commit is saved and snapshot apply failed,
+			// it will panic on next start.
+			if !raft.IsEmptySnap(rd.Snapshot) {
+				objSrcName := leader
+				if raftState == raft.StateLeader {
+					objSrcName = PeerID(0)
+				}
+				if err := rc.executor.ApplySnapshot(rd.Snapshot, objSrcName); err != nil {
+					return err
+				}
+				rc.lastWAL = rd.Snapshot.Metadata.Index
 			}
 
-			if err := rc.storage.Save(rd.HardState, rd.Entries, rd.Snapshot, objSrcName, rd.MustSync); err != nil {
+			if err := rc.storage.Save(rd.HardState, rd.Entries, rd.MustSync); err != nil {
 				return err
 			}
+
 			if len(rd.Entries) > 0 {
 				rc.lastWAL = rd.Entries[len(rd.Entries)-1].Index
 			}
 			rc.transport.Send(rd.Messages)
-			if err := rc.applyEntries(node, objSrcName, rd.CommittedEntries); err != nil {
+			if err := rc.applyEntries(node, rd.CommittedEntries); err != nil {
 				return err
 			}
 			node.Advance(*rd)
@@ -409,16 +377,12 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 
 			entry := &rd.Entries[0]
 
-			rc.doingRequest.Store(entry.Index, termAndResult{
-				term:   entry.Term,
-				result: msg.resCh,
-			})
-
 			if entry.Term != hardState.Term {
 				return fmt.Errorf("proposed term(%d) not equal to hardstate.term(%d)???",
 					entry.Term, hardState.Term)
 			}
 
+			rc.executor.AddContext(entry.Term, entry.Index, msg.resCh)
 			msg.idxCh <- entry.Index
 
 		case err := <-rc.transport.ErrorC:
@@ -443,7 +407,10 @@ func (rc *raftNode) InitRouter(mux *http.ServeMux) {
 	rh := rc.transport.Handler()
 	mux.Handle("/raft", rh)
 	mux.Handle("/raft/", rh)
+	mux.HandleFunc("/raft/wal", rc.getWAL)
 	mux.HandleFunc("/raft/status", rc.getStatus)
+	mux.HandleFunc("/raft/server_stat", rc.getServerStat)
+	mux.HandleFunc("/raft/leader_stat", rc.getLeaderStat)
 	mux.HandleFunc("/raft/members", rc.getMemberStatus)
 	mux.HandleFunc("/raft/members/", rc.confChange)
 }
@@ -526,21 +493,6 @@ func (rc *raftNode) confChange(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (rc *raftNode) getStatus(w http.ResponseWriter, r *http.Request) {
-
-	status, err := rc.GetStatus(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	encoder := json.NewEncoder(w)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-
-	encoder.Encode(status)
-}
-
 func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 	if err := refs.Validate(oplog); err != nil {
 		return err
@@ -588,7 +540,7 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 			return err
 		}
 		index = i
-		defer rc.doingRequest.Delete(index)
+		defer rc.executor.DeleteContext(index)
 	case <-rc.raftDoneC:
 		if rc.raftResult != nil {
 			return rc.raftResult
@@ -657,6 +609,18 @@ func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 	})
 }
 
-func (rc *raftNode) IsIDRemoved(id uint64) bool                           { return false }
-func (rc *raftNode) ReportUnreachable(id uint64)                          {}
-func (rc *raftNode) ReportSnapshot(id uint64, status raft.SnapshotStatus) {}
+func (rc *raftNode) IsIDRemoved(id uint64) bool { return false }
+
+func (rc *raftNode) ReportUnreachable(id uint64) {
+	rc.withPipeline(context.Background(), func(node *raft.RawNode) error {
+		node.ReportUnreachable(id)
+		return nil
+	})
+}
+
+func (rc *raftNode) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
+	rc.withPipeline(context.Background(), func(node *raft.RawNode) error {
+		node.ReportSnapshot(id, status)
+		return nil
+	})
+}

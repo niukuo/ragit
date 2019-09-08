@@ -171,7 +171,7 @@ func (l *listener) checkRefs(refsMap map[string]refs.Hash) error {
 	return nil
 }
 
-func (l *listener) Reset(refsMap map[string]refs.Hash) error {
+func (l *listener) Check(refsMap map[string]refs.Hash) error {
 
 	if err := os.MkdirAll(l.dir, 0755); err != nil {
 		return err

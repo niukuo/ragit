@@ -19,7 +19,7 @@ func (l *emptyListener) Apply(ctx context.Context, oplog refs.Oplog, w io.Writer
 	return status.Encode(w)
 }
 
-func (l *emptyListener) Reset(map[string]refs.Hash) error {
+func (l *emptyListener) Check(map[string]refs.Hash) error {
 	return nil
 }
 

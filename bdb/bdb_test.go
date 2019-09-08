@@ -10,7 +10,6 @@ import (
 	"github.com/niukuo/ragit/bdb"
 	"github.com/niukuo/ragit/dbtest"
 	"github.com/niukuo/ragit/logging"
-	"github.com/niukuo/ragit/raft"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"go.etcd.io/bbolt"
@@ -20,7 +19,19 @@ var flagDBPath = flag.String("bdbpath", "mydb", "db path")
 
 func TestDB(t *testing.T) {
 	s := assert.New(t)
-	suite.Run(t, dbtest.NewDBSuite(func() raft.Storage {
+	suite.Run(t, dbtest.NewDBSuite(func() dbtest.Storage {
+		path := *flagDBPath
+		os.RemoveAll(path)
+		db, err := bdb.Open(path, nil, logging.GetLogger(""))
+		s.NoError(err)
+
+		return db
+	}))
+}
+
+func TestSM(t *testing.T) {
+	s := assert.New(t)
+	suite.Run(t, dbtest.NewSMSuite(func() dbtest.Storage {
 		path := *flagDBPath
 		os.RemoveAll(path)
 		db, err := bdb.Open(path, &emptyListener{}, logging.GetLogger(""))

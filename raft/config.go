@@ -12,6 +12,8 @@ type config struct {
 	TickDuration time.Duration
 	ClusterID    types.ID
 	raft.Config
+	StateMachine
+	Storage
 }
 
 func NewConfig() Config {

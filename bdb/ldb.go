@@ -3,6 +3,7 @@ package bdb
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
@@ -199,4 +200,26 @@ func (s *ldbWALStorage) LastIndex() (uint64, error) {
 	}
 
 	return 0, nil
+}
+
+func (s *ldbWALStorage) Describe(w io.Writer) {
+	it := s.db.NewIterator(nil, nil)
+	defer it.Release()
+
+	var first, last uint64
+
+	if it.First() {
+		first = binary.BigEndian.Uint64(it.Key())
+	}
+
+	if it.Last() {
+		last = binary.BigEndian.Uint64(it.Key())
+	}
+
+	if err := it.Error(); err != nil {
+		fmt.Fprintln(w, "wal: err,", err)
+		return
+	}
+
+	fmt.Fprintf(w, "wal: (%d, %d]\n", first, last)
 }

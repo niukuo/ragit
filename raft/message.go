@@ -2,7 +2,10 @@ package raft
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/golang/protobuf/proto"
+	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/raft"
 	pb "go.etcd.io/etcd/raft/raftpb"
 )
@@ -21,27 +24,50 @@ func (e *Entry) String() string {
 		content["Index"] = e.Index
 	}
 	content["Type"] = e.Type
-	dataStr := ""
-	data := e.Data
-	maxLen := 128
-	if len(data) > maxLen {
-		data = data[:maxLen]
-		dataStr = fmt.Sprintf("(%d/%d bytes)", len(data), len(e.Data)) + string(data)
-	} else {
-		dataStr = fmt.Sprintf("(%d bytes)", len(e.Data)) + string(data)
+	var dataStr strings.Builder
+	for len(e.Data) > 0 {
+		var oplog refs.Oplog
+		if err := proto.Unmarshal(e.Data, &oplog); err != nil {
+			fmt.Fprintf(&dataStr, "(err: %s)", err)
+			break
+		}
+		switch len(oplog.GetOps()) {
+		case 0:
+			break
+		case 1:
+			op := oplog.Ops[0]
+			fmt.Fprintf(&dataStr, "(1): %s %x..%x",
+				op.GetName(), op.OldTarget, op.Target)
+		default:
+			fmt.Fprintf(&dataStr, "(%d)\n", len(oplog.Ops))
+			for _, op := range oplog.Ops {
+				fmt.Fprintf(&dataStr, "%s %x..%x\n",
+					op.GetName(), op.OldTarget, op.Target)
+			}
+		}
+		break
 	}
-	content["data"] = dataStr
+	if dataStr.Len() > 0 {
+		content["data"] = dataStr.String()
+	}
 	return fmt.Sprintf("%v", content)
 }
 
 type Entries []pb.Entry
 
 func (es Entries) String() string {
-	s := make([]*Entry, 0, len(es))
-	for i := range es {
-		s = append(s, (*Entry)(&es[i]))
+	switch len(es) {
+	case 0:
+		return ""
+	case 1:
+		return (*Entry)(&es[0]).String()
+	default:
+		var sb strings.Builder
+		for i := range es {
+			fmt.Fprintf(&sb, "\n%s", (*Entry)(&es[i]))
+		}
+		return sb.String()
 	}
-	return fmt.Sprintf("%v", s)
 }
 
 type Message pb.Message
@@ -64,11 +90,11 @@ func (m *Message) String() string {
 	if m.Commit != 0 {
 		content["Commit"] = m.Commit
 	}
-	if len(m.Entries) > 0 {
-		content["entries"] = Entries(m.Entries)
+	if cnt := len(m.Entries); cnt > 0 {
+		content[fmt.Sprintf("entries(%d)", cnt)] = Entries(m.Entries)
 	}
 	if !raft.IsEmptySnap(m.Snapshot) {
-		content["snapshot"] = m.Snapshot
+		content["snapshot"] = (*Snapshot)(&m.Snapshot)
 	}
 	if m.Reject {
 		content["reject"] = m.RejectHint
@@ -76,5 +102,23 @@ func (m *Message) String() string {
 	if len(m.Context) > 0 {
 		content["context"] = m.Context
 	}
+	return fmt.Sprintf("%v", content)
+}
+
+type Snapshot pb.Snapshot
+
+func (m *Snapshot) String() string {
+	if m == nil {
+		return "<nil>"
+	}
+	content := make(map[string]interface{})
+	content["Index"] = m.Metadata.Index
+	content["Term"] = m.Metadata.Term
+	peers := make([]PeerID, 0)
+	for _, peer := range m.Metadata.ConfState.Nodes {
+		peers = append(peers, PeerID(peer))
+	}
+	content["peers"] = peers
+	content["data"] = fmt.Sprintf("(%d bytes)", len(m.Data))
 	return fmt.Sprintf("%v", content)
 }

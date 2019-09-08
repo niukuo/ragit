@@ -60,8 +60,10 @@ func main() {
 		MaxUncommittedEntriesSize: 1 << 30,
 		PreVote:                   true,
 	}
+	c.Storage = storage
+	c.StateMachine = storage
 
-	node, err := raft.RunNode(c, peers, storage)
+	node, err := raft.RunNode(c, peers)
 	if err != nil {
 		log.Fatalln(err)
 	}
