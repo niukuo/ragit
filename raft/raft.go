@@ -54,6 +54,7 @@ type raftNode struct {
 	// map[index]termAndResult
 	doingRequest sync.Map
 
+	lastWAL uint64
 	// raft backing for the commit/error channel
 	storage Storage
 
@@ -102,6 +103,12 @@ func RunNode(c Config, peers []PeerID, storage Storage) (Node, error) {
 		raftLogger:  logging.GetLogger("raft"),
 		eventLogger: logging.GetLogger("event"),
 	}
+
+	lastWAL, err := storage.LastIndex()
+	if err != nil {
+		return nil, err
+	}
+	rc.lastWAL = lastWAL
 
 	transport := &rafthttp.Transport{
 		Logger:      zap.NewNop(),
@@ -345,6 +352,9 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 
 			if err := rc.storage.Save(rd.HardState, rd.Entries, rd.Snapshot, objSrcName, rd.MustSync); err != nil {
 				return err
+			}
+			if len(rd.Entries) > 0 {
+				rc.lastWAL = rd.Entries[len(rd.Entries)-1].Index
 			}
 			rc.transport.Send(rd.Messages)
 			if err := rc.applyEntries(node, objSrcName, rd.CommittedEntries); err != nil {
@@ -608,16 +618,40 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 
 func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 	return rc.withPipeline(ctx, func(node *raft.RawNode) error {
+		switch m.Type {
+		case pb.MsgHeartbeat:
+			if m.Commit > rc.lastWAL {
+				msgs := []pb.Message{
+					{
+						To:   m.From,
+						From: uint64(rc.id),
+						Type: pb.MsgUnreachable,
+					},
+					{
+						To:   m.From,
+						From: uint64(rc.id),
+						Type: pb.MsgAppResp, Index: m.Commit,
+						Reject: true, RejectHint: rc.lastWAL,
+					},
+				}
+				rc.raftLogger.Warning(
+					"maybe my log was lost, try reject index:", m.Commit,
+					", message: ", (*Message)(&msgs[1]))
+				rc.transport.Send(msgs)
+				return nil
+			}
+		case pb.MsgHeartbeatResp:
+		case pb.MsgUnreachable:
+			node.ReportUnreachable(m.From)
+			rc.raftLogger.Info("report unreachable: ", PeerID(m.From))
+			return nil
+		default:
+			rc.raftLogger.Info("recv message: ", (*Message)(&m))
+		}
 		if err := node.Step(m); err != nil {
 			rc.raftLogger.Warning("step message failed, from: ", PeerID(m.From),
 				", to: ", PeerID(m.To), ", err: ", err, ", msg: ", m)
 			return err
-		}
-		switch m.Type {
-		case pb.MsgHeartbeat:
-		case pb.MsgHeartbeatResp:
-		default:
-			rc.raftLogger.Info("recv message: ", (*Message)(&m))
 		}
 		return nil
 	})
