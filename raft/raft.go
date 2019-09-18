@@ -611,12 +611,7 @@ func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 
 func (rc *raftNode) IsIDRemoved(id uint64) bool { return false }
 
-func (rc *raftNode) ReportUnreachable(id uint64) {
-	rc.withPipeline(context.Background(), func(node *raft.RawNode) error {
-		node.ReportUnreachable(id)
-		return nil
-	})
-}
+func (rc *raftNode) ReportUnreachable(id uint64) {}
 
 func (rc *raftNode) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 	rc.withPipeline(context.Background(), func(node *raft.RawNode) error {
