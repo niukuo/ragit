@@ -59,6 +59,10 @@ type raftNode struct {
 	serverStats *stats.ServerStats
 	leaderStats *stats.LeaderStats
 
+	// used in withPipeline
+	gid  string
+	node *raft.RawNode
+
 	stopC      chan struct{} // signals proposal channel closed
 	raftResult error
 	raftDoneC  chan struct{}
@@ -141,7 +145,9 @@ func RunNode(c Config, peers []PeerID) (Node, error) {
 	}
 
 	go func() {
+		rc.gid = getGID()
 		err := rc.serveRaft(node, c.TickDuration)
+		rc.gid = ""
 		rc.raftResult = err
 		close(rc.raftDoneC)
 		rc.eventLogger.Warning("node stopped, err: ", err)
@@ -424,6 +430,19 @@ func (rc *raftNode) withPipeline(ctx context.Context, fn func(node *raft.RawNode
 	select {
 	case rc.funcC <- newFn:
 		return <-ch
+	case <-rc.raftDoneC:
+		if rc.raftResult != nil {
+			return rc.raftResult
+		}
+		return ErrStopped
+	default:
+		if getGID() == rc.gid {
+			return fn(rc.node)
+		}
+	}
+	select {
+	case rc.funcC <- newFn:
+		return <-ch
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-rc.raftDoneC:
@@ -611,7 +630,12 @@ func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 
 func (rc *raftNode) IsIDRemoved(id uint64) bool { return false }
 
-func (rc *raftNode) ReportUnreachable(id uint64) {}
+func (rc *raftNode) ReportUnreachable(id uint64) {
+	rc.withPipeline(context.Background(), func(node *raft.RawNode) error {
+		node.ReportUnreachable(id)
+		return nil
+	})
+}
 
 func (rc *raftNode) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 	rc.withPipeline(context.Background(), func(node *raft.RawNode) error {
