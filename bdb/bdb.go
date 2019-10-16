@@ -24,6 +24,10 @@ var (
 	BucketRefs  = []byte("refs")
 )
 
+var (
+	ErrReferenceNotFound = errors.New("reference not found")
+)
+
 type Storage = *storage
 type storage struct {
 	WALStorage
@@ -536,6 +540,28 @@ func (s *storage) GetAllRefs() (map[string]refs.Hash, error) {
 		return nil, err
 	}
 	return ret, nil
+}
+
+func (s *storage) GetRefs(name string) (refs.Hash, error) {
+	var hash refs.Hash
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(BucketRefs)
+		if b == nil {
+			return ErrReferenceNotFound
+		}
+		switch v := b.Get([]byte(name)); len(v) {
+		case 0:
+			return ErrReferenceNotFound
+		case refs.HashLen:
+			copy(hash[:], v)
+			return nil
+		default:
+			return fmt.Errorf("invalid hash (len = %d) %x", len(v), v)
+		}
+	}); err != nil {
+		return hash, err
+	}
+	return hash, nil
 }
 
 func (s *storage) OnLeaderStart(term uint64) {
