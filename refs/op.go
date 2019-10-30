@@ -38,8 +38,6 @@ func Validate(oplog Oplog) error {
 
 	if deleteOnly && hasPack {
 		return errors.New("The packfile MUST NOT be sent if the only command used is 'delete'")
-	} else if !deleteOnly && !hasPack {
-		return errors.New("A packfile MUST be sent if either create or update command is used")
 	}
 
 	return nil
