@@ -145,6 +145,7 @@ func RunNode(c Config, peers []PeerID) (Node, error) {
 	}
 
 	go func() {
+		rc.node = node
 		rc.gid = getGID()
 		err := rc.serveRaft(node, c.TickDuration)
 		rc.gid = ""
