@@ -157,7 +157,6 @@ func (rc *raftNode) getStatus(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fmt.Fprintln(w, "state: init")
 	}
-	fmt.Fprintln(w, "gid:", rc.gid)
 	rc.storage.Describe(w)
 	rc.executor.Describe(w)
 	if status == nil || status.RaftState != raft.StateLeader {
