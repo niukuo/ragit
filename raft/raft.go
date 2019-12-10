@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -49,7 +51,8 @@ type raftNode struct {
 	propC       chan *msgWithResult
 	funcC       chan func(node *raft.RawNode)
 
-	lastWAL uint64
+	lastWAL          uint64
+	fetchingSnapshot bool
 
 	storage   Storage
 	executor  Executor
@@ -300,7 +303,6 @@ func (rc *raftNode) serveReady() error {
 		}
 
 		if rd.SoftState != nil {
-			atomic.StorePointer(&rc.softState, unsafe.Pointer(rd.SoftState))
 			from := raftState
 			to := rd.SoftState.RaftState
 			rc.eventLogger.Infof("soft state changed from %s to %s, term: %d",
@@ -325,6 +327,7 @@ func (rc *raftNode) serveReady() error {
 				return err
 			}
 			rc.lastWAL = rd.Snapshot.Metadata.Index
+			rc.fetchingSnapshot = false
 		}
 
 		if err := rc.storage.Save(rd.HardState, rd.Entries, rd.MustSync); err != nil {
@@ -365,6 +368,7 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 			hardState = rd.HardState
 		}
 		if rd.SoftState != nil {
+			atomic.StorePointer(&rc.softState, unsafe.Pointer(rd.SoftState))
 			raftState = rd.SoftState.RaftState
 		}
 		handlingReady = *rd
@@ -471,6 +475,7 @@ func (rc *raftNode) InitRouter(mux *http.ServeMux) {
 	mux.Handle("/raft", rh)
 	mux.Handle("/raft/", rh)
 	mux.HandleFunc("/raft/wal", rc.getWAL)
+	mux.HandleFunc("/raft/snapshot", rc.getSnapshot)
 	mux.HandleFunc("/raft/status", rc.getStatus)
 	mux.HandleFunc("/raft/server_stat", rc.getServerStat)
 	mux.HandleFunc("/raft/leader_stat", rc.getLeaderStat)
@@ -631,35 +636,65 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 	}
 }
 
+func getSnapshot(src PeerID) (*pb.Snapshot, error) {
+	resp, err := http.Get(fmt.Sprintf("http://%s/raft/snapshot", src.Addr()))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	data, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("http status code = %d, data = %s",
+			resp.StatusCode, string(data))
+	}
+
+	var snapshot pb.Snapshot
+	if err := snapshot.Unmarshal(data); err != nil {
+		return nil, err
+	}
+
+	return &snapshot, nil
+}
+
 func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 	return rc.withPipeline(ctx, func(node *raft.RawNode) error {
 		switch m.Type {
 		case pb.MsgHeartbeat:
 			if m.Commit > rc.lastWAL {
-				msgs := []pb.Message{
-					{
-						To:   m.From,
-						From: uint64(rc.id),
-						Type: pb.MsgUnreachable,
-					},
-					{
-						To:   m.From,
-						From: uint64(rc.id),
-						Type: pb.MsgAppResp, Index: m.Commit,
-						Reject: true, RejectHint: rc.lastWAL,
-					},
+				if rc.fetchingSnapshot {
+					m.Commit = 0
+					break
+				}
+				snapshot, err := getSnapshot(PeerID(m.From))
+				if err != nil {
+					rc.raftLogger.Warning(
+						"maybe my log was lost, commit:", m.Commit,
+						", from: ", PeerID(m.From),
+						", get snapshot failed, err: ", err)
+					m.Commit = 0
+					break
+				}
+				rc.fetchingSnapshot = true
+				m = pb.Message{
+					From:     m.From,
+					To:       m.To,
+					Term:     m.Term,
+					Type:     pb.MsgSnap,
+					Snapshot: *snapshot,
 				}
 				rc.raftLogger.Warning(
-					"maybe my log was lost, try reject index:", m.Commit,
-					", message: ", (*Message)(&msgs[1]))
-				rc.transport.Send(msgs)
-				return nil
+					"maybe my log was lost, got snapshot, from: ", PeerID(m.From),
+					", term: ", snapshot.Metadata.Term,
+					", index: ", snapshot.Metadata.Index,
+					", size: ", len(snapshot.Data),
+				)
 			}
 		case pb.MsgHeartbeatResp:
-		case pb.MsgUnreachable:
-			node.ReportUnreachable(m.From)
-			rc.raftLogger.Info("report unreachable: ", PeerID(m.From))
-			return nil
 		default:
 			rc.raftLogger.Info("recv message: ", (*Message)(&m))
 		}
@@ -686,4 +721,22 @@ func (rc *raftNode) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 		node.ReportSnapshot(id, status)
 		return nil
 	})
+}
+
+func (rc *raftNode) getSnapshot(w http.ResponseWriter, r *http.Request) {
+	snapshot, err := rc.storage.Snapshot()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	pb, err := snapshot.Marshal()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-protobuf")
+	w.Header().Set("Content-Length", strconv.Itoa(len(pb)))
+	w.Write(pb)
 }
