@@ -122,7 +122,7 @@ func (s *DBSuite) TestWAL() {
 	s.NoError(err)
 	s.Equal(uint64(2), term)
 
-	state, err := s.db.GetOrInitState(nil)
+	state, err := s.db.GetInitState()
 	s.NoError(err)
 	s.Equal(uint64(0), state.AppliedIndex)
 	s.Equal(uint64(0), state.ConfIndex)

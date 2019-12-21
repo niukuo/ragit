@@ -74,16 +74,11 @@ type raftNode struct {
 	eventLogger logging.Logger
 }
 
-func RunNode(c Config, peers []PeerID) (Node, error) {
-
-	rpeers := make([]raft.Peer, 0, len(peers))
-	for _, peer := range peers {
-		rpeers = append(rpeers, raft.Peer{ID: uint64(peer)})
-	}
+func RunNode(c Config) (Node, error) {
 
 	id := PeerID(c.ID)
 
-	state, err := c.Storage.GetOrInitState(peers)
+	state, err := c.Storage.GetInitState()
 	if err != nil {
 		return nil, err
 	}

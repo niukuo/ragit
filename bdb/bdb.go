@@ -80,7 +80,56 @@ func Open(path string,
 		logger: opts.Logger,
 	}
 
+	if err := s.db.Update(s.init); err != nil {
+		return nil, err
+	}
+
 	return s, nil
+}
+
+func (s *storage) init(tx *bbolt.Tx) error {
+
+	metab, err := tx.CreateBucket(BucketMeta)
+	if err != nil {
+		if err != bbolt.ErrBucketExists {
+			return err
+		}
+		// already inited
+		metab = tx.Bucket(BucketMeta)
+		if v := metab.Get([]byte("conf_index")); v == nil {
+			idx := binary.BigEndian.Uint64(metab.Get([]byte("index")))
+			s.logger.Warning("filling conf_index to ", idx)
+			if err := putUint64(metab, map[string]uint64{
+				"conf_index": idx,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	stateb, err := tx.CreateBucket(BucketState)
+	if err != nil {
+		return err
+	}
+
+	if err := putUint64(metab, map[string]uint64{
+		"term":       0,
+		"index":      0,
+		"conf_index": 0,
+	}); err != nil {
+		return err
+	}
+
+	if err := putUint64(stateb, map[string]uint64{
+		"term":   0,
+		"commit": 0,
+		"vote":   0,
+	}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (s *storage) Close() {
@@ -370,6 +419,25 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 	return nil
 }
 
+func getInitState(
+	stateb *bbolt.Bucket, hardState *pb.HardState,
+	metab *bbolt.Bucket, confState *pb.ConfState,
+) error {
+
+	getUint64(stateb, map[string]*uint64{
+		"term":   &hardState.Term,
+		"vote":   &hardState.Vote,
+		"commit": &hardState.Commit,
+	})
+
+	if err := confState.Unmarshal(
+		metab.Get([]byte("conf_state"))); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (s *storage) InitialState() (pb.HardState, pb.ConfState, error) {
 	var (
 		hardState pb.HardState
@@ -378,15 +446,13 @@ func (s *storage) InitialState() (pb.HardState, pb.ConfState, error) {
 
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		stateb := tx.Bucket(BucketState)
-		getUint64(stateb, map[string]*uint64{
-			"term":   &hardState.Term,
-			"vote":   &hardState.Vote,
-			"commit": &hardState.Commit,
-		})
 
 		metab := tx.Bucket(BucketMeta)
-		if err := confState.Unmarshal(
-			metab.Get([]byte("conf_state"))); err != nil {
+
+		if err := getInitState(
+			stateb, &hardState,
+			metab, &confState,
+		); err != nil {
 			return err
 		}
 
@@ -398,21 +464,47 @@ func (s *storage) InitialState() (pb.HardState, pb.ConfState, error) {
 	return hardState, confState, nil
 }
 
-func (s *storage) initBucket(
-	metab *bbolt.Bucket,
-	stateb *bbolt.Bucket,
-	peers []refs.PeerID) error {
+func (s *storage) Bootstrap(peers []refs.PeerID) error {
+	if len(peers) == 0 {
+		return errors.New("cant bootstrap with empty peers")
+	}
+	s.logger.Info("bootstraping using ", peers)
 
-	if len(peers) > 0 {
-		s.logger.Info("bootstraping using ", peers)
-		var confState pb.ConfState
-		for _, peer := range peers {
-			confState.Nodes = append(confState.Nodes, uint64(peer))
+	var confState pb.ConfState
+	for _, peer := range peers {
+		confState.Nodes = append(confState.Nodes, uint64(peer))
+	}
+
+	data, err := confState.Marshal()
+	if err != nil {
+		return err
+	}
+
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		stateb := tx.Bucket(BucketState)
+		metab := tx.Bucket(BucketMeta)
+
+		var (
+			hardState pb.HardState
+			confState pb.ConfState
+		)
+
+		if err := getInitState(
+			stateb, &hardState,
+			metab, &confState,
+		); err != nil {
+			return err
 		}
 
-		data, err := confState.Marshal()
-		if err != nil {
-			return err
+		if hardState.Term == 1 {
+			hardState.Term = 0
+		}
+		if !raft.IsEmptyHardState(hardState) {
+			return fmt.Errorf("already bootstrapped: %+v", hardState)
+		}
+
+		if confState.Size() != 0 {
+			return errors.New("already has members")
 		}
 
 		if err := putUint64(metab, map[string]uint64{
@@ -445,20 +537,6 @@ func (s *storage) initBucket(
 		}
 
 		return nil
-	}
-
-	if err := putUint64(metab, map[string]uint64{
-		"term":       0,
-		"index":      0,
-		"conf_index": 0,
-	}); err != nil {
-		return err
-	}
-
-	if err := putUint64(stateb, map[string]uint64{
-		"term":   0,
-		"commit": 0,
-		"vote":   0,
 	}); err != nil {
 		return err
 	}
@@ -466,57 +544,32 @@ func (s *storage) initBucket(
 	return nil
 }
 
-func (s *storage) GetOrInitState(peers []refs.PeerID) (*ragit.InitialState, error) {
+func (s *storage) GetInitState() (*ragit.InitialState, error) {
 
 	var state ragit.InitialState
 
-	if err := s.db.Update(func(tx *bbolt.Tx) error {
-		metab, err := tx.CreateBucket(BucketMeta)
-		var stateb *bbolt.Bucket
-		switch err {
-		case nil:
-			stateb, err = tx.CreateBucket(BucketState)
-			if err != nil {
-				return err
-			}
-			if err := s.initBucket(metab, stateb, peers); err != nil {
-				return err
-			}
-		case bbolt.ErrBucketExists:
-			metab = tx.Bucket(BucketMeta)
-			if v := metab.Get([]byte("conf_index")); v == nil {
-				idx := binary.BigEndian.Uint64(metab.Get([]byte("index")))
-				s.logger.Warning("filling conf_index to ", idx)
-				if err := putUint64(metab, map[string]uint64{
-					"conf_index": idx,
-				}); err != nil {
-					return err
-				}
-			}
-			stateb = tx.Bucket(BucketState)
-		default:
-			return err
-		}
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		stateb := tx.Bucket(BucketState)
+		metab := tx.Bucket(BucketMeta)
+
 		var confState pb.ConfState
-		if err := confState.Unmarshal(
-			metab.Get([]byte("conf_state"))); err != nil {
+
+		if err := getInitState(
+			stateb, &state.HardState,
+			metab, &confState,
+		); err != nil {
 			return err
 		}
-		peers = make([]refs.PeerID, 0, len(confState.Nodes))
+
+		peers := make([]refs.PeerID, 0, len(confState.Nodes))
 		for _, peer := range confState.Nodes {
 			peers = append(peers, refs.PeerID(peer))
 		}
 		state.Peers = peers
+
 		getUint64(metab, map[string]*uint64{
 			"conf_index": &state.ConfIndex,
 			"index":      &state.AppliedIndex,
-		})
-
-		stateb = tx.Bucket(BucketState)
-		getUint64(stateb, map[string]*uint64{
-			"term":   &state.HardState.Term,
-			"vote":   &state.HardState.Vote,
-			"commit": &state.HardState.Commit,
 		})
 
 		return nil

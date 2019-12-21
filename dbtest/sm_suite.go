@@ -40,7 +40,7 @@ func (s *SMSuite) TearDownTest() {
 }
 
 func (s *SMSuite) checkIndex(confIndex, dataIndex uint64) {
-	state, err := s.storage.GetOrInitState(nil)
+	state, err := s.storage.GetInitState()
 	s.NoError(err)
 	s.Equal(confIndex, state.ConfIndex)
 	s.Equal(dataIndex, state.AppliedIndex)
@@ -48,7 +48,7 @@ func (s *SMSuite) checkIndex(confIndex, dataIndex uint64) {
 
 func (s *SMSuite) TestApply() {
 
-	state, err := s.storage.GetOrInitState(nil)
+	state, err := s.storage.GetInitState()
 	s.NoError(err)
 	s.True(raft.IsEmptyHardState(state.HardState))
 	s.Len(state.Peers, 0)

@@ -52,6 +52,14 @@ func main() {
 		log.Fatalln(err)
 	}
 
+	if hardState, confState, err := storage.InitialState(); err != nil {
+		log.Fatalln(err)
+	} else if etcdraft.IsEmptyHardState(hardState) && confState.Size() == 0 {
+		if err := storage.Bootstrap(peers); err != nil {
+			log.Fatalln("bootstrap failed: ", err)
+		}
+	}
+
 	// raft provides a commit stream for the proposals from the http api
 	c := raft.NewConfig()
 	c.Config = etcdraft.Config{
@@ -67,7 +75,7 @@ func main() {
 	c.Storage = storage
 	c.StateMachine = storage
 
-	node, err := raft.RunNode(c, peers)
+	node, err := raft.RunNode(c)
 	if err != nil {
 		log.Fatalln(err)
 	}

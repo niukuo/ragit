@@ -19,7 +19,7 @@ type InitialState struct {
 type Storage interface {
 	raft.Storage
 
-	GetOrInitState(peers []refs.PeerID) (*InitialState, error)
+	GetInitState() (*InitialState, error)
 	Save(hardState pb.HardState, entries []pb.Entry, sync bool) error
 
 	Describe(w io.Writer)
