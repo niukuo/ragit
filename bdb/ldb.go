@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 
 	"github.com/niukuo/ragit/logging"
@@ -21,6 +22,10 @@ type ldbWALStorage struct {
 
 	snapshotIndex uint64
 	keepLogCount  uint64
+
+	locker     sync.Mutex
+	firstIndex uint64
+	lastIndex  uint64
 
 	logger logging.Logger
 }
@@ -43,14 +48,57 @@ func OpenWAL(path string, opts *WALOptions) (LdbWALStorage, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	s := &ldbWALStorage{
 		db: db,
 
 		keepLogCount: uint64(opts.KeepLogCount),
 
+		firstIndex: 0,
+		lastIndex:  0,
+
 		logger: opts.Logger,
 	}
+
+	if err := s.fillIndex(); err != nil {
+		return nil, err
+	}
+
 	return s, nil
+}
+
+func (s *ldbWALStorage) fillIndex() error {
+
+	s.locker.Lock()
+	defer s.locker.Unlock()
+
+	it := s.db.NewIterator(nil, nil)
+	defer it.Release()
+
+	if !it.First() {
+		if err := it.Error(); err != nil {
+			return err
+		}
+	} else {
+		s.firstIndex = binary.BigEndian.Uint64(it.Key())
+	}
+
+	if !it.Last() {
+		if err := it.Error(); err != nil {
+			return err
+		}
+	} else {
+		s.lastIndex = binary.BigEndian.Uint64(it.Key())
+	}
+
+	it.Release()
+	if err := it.Error(); err != nil {
+		return err
+	}
+
+	s.logger.Infof("wal: (%d, %d]", s.firstIndex, s.lastIndex)
+
+	return nil
 }
 
 func (s *ldbWALStorage) Close() {
@@ -166,6 +214,10 @@ func (s *ldbWALStorage) SaveWAL(ents []pb.Entry, sync bool) error {
 		return err
 	}
 
+	if err := s.fillIndex(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -241,54 +293,18 @@ func (s *ldbWALStorage) Term(i uint64) (uint64, error) {
 }
 
 func (s *ldbWALStorage) FirstIndex() (uint64, error) {
-	it := s.db.NewIterator(nil, nil)
-	defer it.Release()
-
-	if it.First() {
-		return binary.BigEndian.Uint64(it.Key()) + 1, nil
-	}
-
-	if err := it.Error(); err != nil {
-		return 0, err
-	}
-
-	return 1, nil
-
+	return s.firstIndex + 1, nil
 }
 
 func (s *ldbWALStorage) LastIndex() (uint64, error) {
-	it := s.db.NewIterator(nil, nil)
-	defer it.Release()
-
-	if it.Last() {
-		return binary.BigEndian.Uint64(it.Key()), nil
-	}
-
-	if err := it.Error(); err != nil {
-		return 0, err
-	}
-
-	return 0, nil
+	return s.lastIndex, nil
 }
 
 func (s *ldbWALStorage) Describe(w io.Writer) {
-	it := s.db.NewIterator(nil, nil)
-	defer it.Release()
 
-	var first, last uint64
-
-	if it.First() {
-		first = binary.BigEndian.Uint64(it.Key())
-	}
-
-	if it.Last() {
-		last = binary.BigEndian.Uint64(it.Key())
-	}
-
-	if err := it.Error(); err != nil {
-		fmt.Fprintln(w, "wal: err,", err)
-		return
-	}
+	s.locker.Lock()
+	first, last := s.firstIndex, s.lastIndex
+	s.locker.Unlock()
 
 	fmt.Fprintf(w, "wal: (%d, %d]\n", first, last)
 }
