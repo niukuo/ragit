@@ -93,6 +93,9 @@ func RunNode(c Config, peers []PeerID) (Node, error) {
 		return nil, err
 	}
 
+	c.Config.DisableProposalForwarding = true
+	c.Config.Applied = state.AppliedIndex
+
 	node, err := raft.NewRawNode(&c.Config, nil)
 	if err != nil {
 		return nil, err
@@ -477,6 +480,7 @@ func (rc *raftNode) InitRouter(mux *http.ServeMux) {
 	mux.HandleFunc("/raft/wal", rc.getWAL)
 	mux.HandleFunc("/raft/snapshot", rc.getSnapshot)
 	mux.HandleFunc("/raft/status", rc.getStatus)
+	mux.HandleFunc("/raft/campaign", rc.campaign)
 	mux.HandleFunc("/raft/server_stat", rc.getServerStat)
 	mux.HandleFunc("/raft/leader_stat", rc.getLeaderStat)
 	mux.HandleFunc("/raft/members", rc.getMemberStatus)
@@ -739,4 +743,11 @@ func (rc *raftNode) getSnapshot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-protobuf")
 	w.Header().Set("Content-Length", strconv.Itoa(len(pb)))
 	w.Write(pb)
+}
+
+func (rc *raftNode) campaign(w http.ResponseWriter, r *http.Request) {
+	err := rc.withPipeline(r.Context(), func(node *raft.RawNode) error {
+		return node.Campaign()
+	})
+	fmt.Fprint(w, err)
 }
