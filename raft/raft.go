@@ -83,11 +83,6 @@ func RunNode(c Config) (Node, error) {
 		return nil, err
 	}
 
-	lastWAL, err := c.Storage.LastIndex()
-	if err != nil {
-		return nil, err
-	}
-
 	c.Config.DisableProposalForwarding = true
 	c.Config.Applied = state.AppliedIndex
 
@@ -105,8 +100,6 @@ func RunNode(c Config) (Node, error) {
 		confChangeC: make(chan pb.ConfChange),
 		propC:       make(chan *msgWithResult),
 		funcC:       make(chan func(node *raft.RawNode)),
-
-		lastWAL: lastWAL,
 
 		storage: c.Storage,
 
@@ -324,7 +317,6 @@ func (rc *raftNode) serveReady() error {
 			if err := rc.executor.ApplySnapshot(rd.Snapshot, objSrcName); err != nil {
 				return err
 			}
-			rc.lastWAL = rd.Snapshot.Metadata.Index
 			rc.fetchingSnapshot = false
 		}
 
@@ -332,9 +324,6 @@ func (rc *raftNode) serveReady() error {
 			return err
 		}
 
-		if len(rd.Entries) > 0 {
-			rc.lastWAL = rd.Entries[len(rd.Entries)-1].Index
-		}
 		rc.transport.Send(rd.Messages)
 		if err := rc.applyEntries(rd.CommittedEntries); err != nil {
 			return err
@@ -664,7 +653,9 @@ func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 	return rc.withPipeline(ctx, func(node *raft.RawNode) error {
 		switch m.Type {
 		case pb.MsgHeartbeat:
-			if m.Commit > rc.lastWAL {
+			if lastWAL, err := rc.storage.LastIndex(); err != nil {
+				return err
+			} else if m.Commit > lastWAL {
 				if rc.fetchingSnapshot {
 					m.Commit = 0
 					break
