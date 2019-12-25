@@ -39,9 +39,8 @@ type executor struct {
 
 	leaderTerm uint64
 
-	indexMatched bool
-	confIndex    uint64
-	dataIndex    uint64
+	confIndex uint64
+	dataIndex uint64
 
 	confCh  chan confChangeContext
 	entryCh chan *pb.Entry
@@ -144,36 +143,12 @@ func (e *executor) OnLeaderStop() {
 	})
 }
 
-func (e *executor) checkIndex(index uint64) error {
-
-	curIndex := atomic.LoadUint64(&e.dataIndex)
-
-	if !e.indexMatched && index <= curIndex {
-		return nil
-	}
-
-	if index != curIndex+1 {
-		e.logger.Warning("index gap, matched: ", e.indexMatched,
-			", expect: ", curIndex+1, ", actual: ", index)
-		return fmt.Errorf("index gap, expect %d, actual %d",
-			curIndex+1, index)
-	}
-
-	if !e.indexMatched {
-		e.logger.Info("index matched, index: ", index)
-	}
-
-	e.indexMatched = true
-
-	return nil
-}
-
 func (e *executor) AppendEntry(entry *pb.Entry) error {
-	if err := e.checkIndex(entry.Index); err != nil {
-		return err
-	}
-	if !e.indexMatched {
-		return nil
+	if expect := atomic.LoadUint64(&e.dataIndex) + 1; entry.Index != expect {
+		e.logger.Warning("index gap, expect: ", expect,
+			", actual: ", entry.Index)
+		return fmt.Errorf("index gap, expect %d, actual %d",
+			expect, entry.Index)
 	}
 
 	var entryCh chan<- *pb.Entry
@@ -206,6 +181,9 @@ func (e *executor) AppendEntry(entry *pb.Entry) error {
 			}
 
 			confCh = e.confCh
+		} else {
+			// drop
+			confCh = make(chan confChangeContext, 1)
 		}
 	default:
 		return fmt.Errorf("unsupported entry type %s", typ)
@@ -278,8 +256,7 @@ func (e *executor) Run() (err error) {
 		case <-e.stopCh:
 			return nil
 		case entry := <-e.entryCh:
-			if entry.Term == atomic.LoadUint64(&e.leaderTerm) &&
-				entry.Term == atomic.SwapUint64(&e.leaderTerm, 0) {
+			if atomic.CompareAndSwapUint64(&e.leaderTerm, entry.Term, 0) {
 				e.sm.OnLeaderStart(entry.Term)
 			}
 			if err := e.applyEntry(entry); err != nil {

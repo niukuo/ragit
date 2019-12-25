@@ -189,6 +189,8 @@ func (s *ldbWALStorage) SaveWAL(ents []pb.Entry, sync bool) error {
 			del = true
 			delReason = "recycling"
 			first = delEnd
+		} else if first == 0 {
+			first = 1
 		}
 
 		last = newLast
