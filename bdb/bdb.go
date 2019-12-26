@@ -129,6 +129,10 @@ func (s *storage) init(tx *bbolt.Tx) error {
 		return err
 	}
 
+	if _, err := tx.CreateBucket(BucketRefs); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -156,9 +160,8 @@ func putUint64(b *bbolt.Bucket, data map[string]uint64) error {
 	return nil
 }
 
-func saveConfState(b *bbolt.Bucket, term, index uint64, confState pb.ConfState) error {
+func saveConfState(b *bbolt.Bucket, index uint64, confState pb.ConfState) error {
 	if err := putUint64(b, map[string]uint64{
-		"term":       term,
 		"conf_index": index,
 	}); err != nil {
 		return err
@@ -274,13 +277,13 @@ func (s *storage) OnSnapshot(
 
 		metab := tx.Bucket(BucketMeta)
 		if err := saveConfState(metab,
-			snapshot.Metadata.Term,
 			snapshot.Metadata.Index,
 			snapshot.Metadata.ConfState); err != nil {
 			return err
 		}
 
 		if err := putUint64(metab, map[string]uint64{
+			"term":  snapshot.Metadata.Term,
 			"index": snapshot.Metadata.Index,
 		}); err != nil {
 			return err
@@ -309,12 +312,12 @@ func (s *storage) OnSnapshot(
 
 }
 
-func (s *storage) OnConfState(term, index uint64, confState pb.ConfState) error {
+func (s *storage) OnConfState(index uint64, confState pb.ConfState) error {
 
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
 
 		metab := tx.Bucket(BucketMeta)
-		if err := saveConfState(metab, term, index, confState); err != nil {
+		if err := saveConfState(metab, index, confState); err != nil {
 			return err
 		}
 
@@ -349,10 +352,7 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 			return nil
 		}
 
-		refsb, err := tx.CreateBucketIfNotExists(BucketRefs)
-		if err != nil {
-			return err
-		}
+		refsb := tx.Bucket(BucketRefs)
 
 		for _, op := range oplog.GetOps() {
 			name := []byte(op.GetName())
@@ -391,7 +391,7 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 		}
 
 		if len(oplog.Ops) > 0 {
-			if err = s.listener.Apply(ctx, oplog, out); err != nil {
+			if err := s.listener.Apply(ctx, oplog, out); err != nil {
 				refs.ReportError(out, err)
 				return err
 			}
@@ -594,13 +594,11 @@ func (s *storage) Snapshot() (pb.Snapshot, error) {
 			"index": &snapshot.Metadata.Index,
 		})
 		refsb := tx.Bucket(BucketRefs)
-		if refsb != nil {
-			refsMap := make(map[string]refs.Hash)
-			if err := getAllRefs(refsb, refsMap); err != nil {
-				return err
-			}
-			snapshot.Data = refs.EncodeSnapshot(refsMap)
+		refsMap := make(map[string]refs.Hash)
+		if err := getAllRefs(refsb, refsMap); err != nil {
+			return err
 		}
+		snapshot.Data = refs.EncodeSnapshot(refsMap)
 		return nil
 	}); err != nil {
 		return snapshot, err
@@ -623,9 +621,6 @@ func (s *storage) GetRefs(name string) (refs.Hash, error) {
 	var hash refs.Hash
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(BucketRefs)
-		if b == nil {
-			return ErrReferenceNotFound
-		}
 		switch v := b.Get([]byte(name)); len(v) {
 		case 0:
 			return ErrReferenceNotFound
@@ -707,9 +702,6 @@ func (s *storage) Describe(w io.Writer) {
 }
 
 func getAllRefs(refsb *bbolt.Bucket, refsMap map[string]refs.Hash) error {
-	if refsb == nil {
-		return nil
-	}
 
 	if err := refsb.ForEach(func(k, v []byte) error {
 

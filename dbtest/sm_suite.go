@@ -114,7 +114,7 @@ func (s *SMSuite) TestApply() {
 		Nodes: []uint64{111, 222, 333},
 	}
 
-	s.NoError(s.storage.OnConfState(3, 3, confState))
+	s.NoError(s.storage.OnConfState(3, confState))
 	s.checkIndex(3, 2)
 
 	_, confState, err = s.storage.InitialState()

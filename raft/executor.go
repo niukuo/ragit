@@ -23,7 +23,7 @@ type StateMachine interface {
 	OnLeaderStop()
 	OnSnapshot(snapshot pb.Snapshot, srcId PeerID) error
 	OnApply(ctx context.Context, term, index uint64, oplog refs.Oplog) error
-	OnConfState(term, index uint64, confState pb.ConfState) error
+	OnConfState(index uint64, confState pb.ConfState) error
 }
 
 type Executor = *executor
@@ -265,7 +265,7 @@ func (e *executor) Run() (err error) {
 			atomic.StoreUint64(&e.appliedIndex, entry.Index)
 		case conf := <-e.confCh:
 			if err := e.sm.OnConfState(
-				conf.term, conf.index, conf.state); err != nil {
+				conf.index, conf.state); err != nil {
 				return err
 			}
 			atomic.StoreUint64(&e.appliedConfIndex, conf.index)
