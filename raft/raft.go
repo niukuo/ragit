@@ -170,18 +170,6 @@ func reportErrToMsg(msg *msgWithResult, err error) {
 	}
 }
 
-// applyEntries writes committed log entries to commit channel and returns
-// whether all entries could be published.
-func (rc *raftNode) applyEntries(ents []pb.Entry) error {
-	for i := range ents {
-		entry := &ents[i]
-		if err := rc.executor.AppendEntry(entry); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // stop closes http, closes all channels, and stops raft.
 func (rc *raftNode) Stop() error {
 	close(rc.stopC)
@@ -193,8 +181,6 @@ func (rc *raftNode) Stop() error {
 	}
 	return err
 }
-
-var snapshotCatchUpEntriesN uint64 = 10000
 
 func readyForLogger(rd *raft.Ready) []interface{} {
 	logFields := []interface{}{
@@ -221,11 +207,11 @@ func readyForLogger(rd *raft.Ready) []interface{} {
 		last := &rd.Entries[len(rd.Entries)-1]
 		logFields = append(logFields, ", Entries: ")
 		if len(rd.Entries) == 1 {
-			logFields = append(logFields, "(", first.Term, ", ", first.Index, ")")
+			logFields = append(logFields, first.Term, "/", first.Index)
 		} else {
 			logFields = append(logFields, len(rd.Entries),
-				", (", first.Term, ", ", first.Index, ") - (",
-				last.Term, ", ", last.Index, ")")
+				", [", first.Term, "/", first.Index, ", ",
+				last.Term, "/", last.Index, "]")
 		}
 	}
 
@@ -241,11 +227,11 @@ func readyForLogger(rd *raft.Ready) []interface{} {
 		last := &rd.CommittedEntries[len(rd.CommittedEntries)-1]
 		logFields = append(logFields, ", Committed: ")
 		if len(rd.CommittedEntries) == 1 {
-			logFields = append(logFields, "(", first.Term, ", ", first.Index, ")")
+			logFields = append(logFields, "(", first.Term, "/", first.Index, ")")
 		} else {
 			logFields = append(logFields, len(rd.CommittedEntries),
-				", (", first.Term, ", ", first.Index, ") - (",
-				last.Term, ", ", last.Index, ")")
+				", (", first.Term, "/", first.Index, ") - (",
+				last.Term, "/", last.Index, ")")
 		}
 	}
 
@@ -315,18 +301,25 @@ func (rc *raftNode) serveReady() error {
 				objSrcName = PeerID(0)
 			}
 			if err := rc.executor.ApplySnapshot(rd.Snapshot, objSrcName); err != nil {
+				rc.raftLogger.Warning("apply snapshot failed, err: ", err)
 				return err
 			}
 			rc.fetchingSnapshot = false
 		}
 
 		if err := rc.storage.Save(rd.HardState, rd.Entries, rd.MustSync); err != nil {
+			rc.raftLogger.Warning("persistent failed, err: ", err)
 			return err
 		}
 
 		rc.transport.Send(rd.Messages)
-		if err := rc.applyEntries(rd.CommittedEntries); err != nil {
-			return err
+
+		for i := range rd.CommittedEntries {
+			entry := &rd.CommittedEntries[i]
+			if err := rc.executor.AppendEntry(entry); err != nil {
+				rc.raftLogger.Warning("append entry failed, index: ", entry.Index, ", err: ", err)
+				return err
+			}
 		}
 
 		select {
@@ -437,6 +430,7 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 			advanceC = nil
 
 		case err := <-rc.transport.ErrorC:
+			rc.raftLogger.Warning("transport stopped, err: ", err)
 			return err
 
 		case fn := <-rc.funcC:
