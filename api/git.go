@@ -241,7 +241,7 @@ func (h *httpGitAPI) serviceRPC(w http.ResponseWriter, r *http.Request, service 
 		h.path,
 	}
 
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(r.Context(), "git", args...)
 	cmd.Stdout = w
 	cmd.Stderr = &stderr
 	cmd.Stdin = reqBody
