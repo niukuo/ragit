@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -17,11 +17,8 @@ import (
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/etcdserver/api/rafthttp"
-	stats "go.etcd.io/etcd/etcdserver/api/v2stats"
-	"go.etcd.io/etcd/pkg/types"
 	"go.etcd.io/etcd/raft"
 	pb "go.etcd.io/etcd/raft/raftpb"
-	"go.uber.org/zap"
 )
 
 var ErrStopped = errors.New("stopped")
@@ -39,36 +36,35 @@ type applyResult struct {
 	done    chan<- error
 }
 
+type termAndResult struct {
+	term   uint64
+	result <-chan applyResult
+}
+
 // A key-value stream backed by raft
-type Node = *raftNode
+type Node interface {
+	rafthttp.Raft
+
+	getContext(term, index uint64) (*applyResult, bool)
+	applyConfChange(cc pb.ConfChange) (*pb.ConfState, error)
+
+	InitRouter(mux *http.ServeMux)
+	Propose(ctx context.Context, oplog refs.Oplog) error
+	GetStatus(ctx context.Context) (*Status, error)
+}
+
 type raftNode struct {
-	id PeerID
-
-	readyC   chan (<-chan *raft.Ready)
-	advanceC chan struct{}
-
 	confChangeC chan pb.ConfChange // proposed cluster config changes
 	propC       chan *msgWithResult
 	funcC       chan func(node *raft.RawNode)
 
-	lastWAL          uint64
-	fetchingSnapshot bool
-
-	storage   Storage
-	executor  Executor
 	softState unsafe.Pointer
 
-	transport   *rafthttp.Transport
-	serverStats *stats.ServerStats
-	leaderStats *stats.LeaderStats
+	// map[index]termAndResult
+	doingRequest sync.Map
 
-	stopC chan struct{} // signals proposal channel closed
-
-	readyResult error
-	readyDoneC  chan struct{}
-
-	raftResult error
-	raftDoneC  chan struct{}
+	readyHandler ReadyHandler
+	raftRunner   Runner
 
 	raftLogger  logging.Logger
 	eventLogger logging.Logger
@@ -92,245 +88,87 @@ func RunNode(c Config) (Node, error) {
 	}
 
 	rc := &raftNode{
-		id: id,
-
-		readyC:   make(chan (<-chan *raft.Ready)),
-		advanceC: make(chan struct{}),
-
 		confChangeC: make(chan pb.ConfChange),
 		propC:       make(chan *msgWithResult),
 		funcC:       make(chan func(node *raft.RawNode)),
 
-		storage: c.Storage,
-
-		serverStats: stats.NewServerStats(id.String(), id.String()),
-		leaderStats: stats.NewLeaderStats(id.String()),
-
-		stopC: make(chan struct{}),
-
-		readyDoneC: make(chan struct{}),
-
-		raftDoneC: make(chan struct{}),
-
 		raftLogger:  logging.GetLogger("raft"),
 		eventLogger: logging.GetLogger("event"),
 	}
-
-	transport := &rafthttp.Transport{
-		Logger:      zap.NewNop(),
-		ID:          types.ID(id),
-		URLs:        types.MustNewURLs([]string{"http://" + id.Addr()}),
-		ClusterID:   c.ClusterID,
-		Raft:        rc,
-		ServerStats: rc.serverStats,
-		LeaderStats: rc.leaderStats,
-		ErrorC:      make(chan error),
-	}
-
-	executor := NewExecutor(id,
-		node, transport, c.StateMachine,
-		logging.GetLogger("executor"))
-
-	rc.transport = transport
-	rc.executor = executor
 
 	rc.raftLogger.Info("starting raft instance, applied_index: ", state.AppliedIndex,
 		", committed_index: ", state.HardState.Commit,
 		", conf_index: ", state.ConfIndex,
 		", nodes: ", state.Peers)
 
-	if err := rc.executor.Start(
-		state.ConfIndex, state.AppliedIndex, state.Peers,
-	); err != nil {
+	readyHandler, err := StartReadyHandler(
+		c.ClusterID,
+		id,
+		rc,
+		c.Storage,
+		c.StateMachine,
+		state,
+	)
+	if err != nil {
 		return nil, err
 	}
 
-	go func() {
-		err := rc.serveRaft(node, c.TickDuration)
-		rc.raftResult = err
-		close(rc.raftDoneC)
-		rc.eventLogger.Warning("node stopped, err: ", err)
-	}()
+	rc.readyHandler = readyHandler
 
-	go func() {
-		err := rc.serveReady()
-		rc.readyResult = err
-		close(rc.readyDoneC)
-		rc.eventLogger.Warning("ready handler stopped, err: ", err)
-	}()
+	rc.raftRunner = StartRunner(func(stopC <-chan struct{}) error {
+		e := rc.serveRaft(stopC, node, c.TickDuration)
+		rc.eventLogger.Warning("node stopped, stopping ready handler. err: ", e)
+
+		rc.readyHandler.Stop()
+		<-rc.readyHandler.Done()
+		if err := rc.readyHandler.Error(); err != nil {
+			e = err
+		}
+
+		return e
+	})
 
 	return rc, nil
 }
 
-func reportErrToMsg(msg *msgWithResult, err error) {
+func (rc *raftNode) getContext(term, index uint64) (*applyResult, bool) {
+	v, ok := rc.doingRequest.Load(index)
+	if !ok {
+		return nil, false
+	}
+
+	tr := v.(termAndResult)
+	res, ok := <-tr.result
+	if !ok {
+		return nil, false
+	}
+
+	if tr.term != term {
+		res.done <- &errTermChanged{
+			proposedTerm:  tr.term,
+			committedTerm: term,
+		}
+		return nil, false
+	}
+
+	return &res, true
+}
+
+func (msg *msgWithResult) Error(err error) {
 	msg.err = err
 	close(msg.idxCh)
-	if res, ok := <-msg.resCh; ok {
-		res.done <- err
-	}
 }
 
-// stop closes http, closes all channels, and stops raft.
 func (rc *raftNode) Stop() error {
-	close(rc.stopC)
-	rc.transport.Stop()
-	err := rc.executor.Stop()
-	<-rc.raftDoneC
-	if e := rc.raftResult; e != nil {
-		err = e
+	rc.raftRunner.Stop()
+	<-rc.raftRunner.Done()
+	if err := rc.raftRunner.Error(); err != nil {
+		return err
 	}
-	return err
+	return nil
 }
 
-func readyForLogger(rd *raft.Ready) []interface{} {
-	logFields := []interface{}{
-		"ready",
-	}
-
-	if rd.SoftState != nil {
-		logFields = append(logFields,
-			", Lead: ", PeerID(rd.SoftState.Lead),
-			", RaftState: ", rd.SoftState.RaftState,
-		)
-	}
-
-	if !raft.IsEmptyHardState(rd.HardState) {
-		logFields = append(logFields,
-			", Term: ", rd.HardState.Term,
-			", Vote: ", PeerID(rd.HardState.Vote),
-			", Commit: ", rd.HardState.Commit,
-		)
-	}
-
-	if len(rd.Entries) > 0 {
-		first := &rd.Entries[0]
-		last := &rd.Entries[len(rd.Entries)-1]
-		logFields = append(logFields, ", Entries: ")
-		if len(rd.Entries) == 1 {
-			logFields = append(logFields, first.Term, "/", first.Index)
-		} else {
-			logFields = append(logFields, len(rd.Entries),
-				", [", first.Term, "/", first.Index, ", ",
-				last.Term, "/", last.Index, "]")
-		}
-	}
-
-	if !raft.IsEmptySnap(rd.Snapshot) {
-		logFields = append(logFields,
-			", Snapshot: ",
-			(*Snapshot)(&rd.Snapshot),
-		)
-	}
-
-	if len(rd.CommittedEntries) > 0 {
-		first := &rd.CommittedEntries[0]
-		last := &rd.CommittedEntries[len(rd.CommittedEntries)-1]
-		logFields = append(logFields, ", Committed: ")
-		if len(rd.CommittedEntries) == 1 {
-			logFields = append(logFields, "(", first.Term, "/", first.Index, ")")
-		} else {
-			logFields = append(logFields, len(rd.CommittedEntries),
-				", (", first.Term, "/", first.Index, ") - (",
-				last.Term, "/", last.Index, ")")
-		}
-	}
-
-	msgCnt := 0
-
-	if len(rd.Messages) > 0 {
-		logFields = append(logFields, ", Messages: ", len(rd.Messages))
-		for i := range rd.Messages {
-			switch rd.Messages[i].Type {
-			case pb.MsgHeartbeat:
-				continue
-			case pb.MsgHeartbeatResp:
-				continue
-			}
-			msgCnt++
-			logFields = append(logFields, (*Message)(&rd.Messages[i]))
-		}
-	}
-
-	if len(logFields) == 3+msgCnt && len(rd.Messages) > 0 {
-		return nil
-	}
-
-	return logFields
-}
-
-func (rc *raftNode) serveReady() error {
-	raftState := raft.StateFollower
-	var hardState pb.HardState
-	leader := PeerID(0)
-	for {
-		var rd *raft.Ready
-		select {
-		case <-rc.stopC:
-			return nil
-		case ch := <-rc.readyC:
-			rd = <-ch
-		}
-
-		if fields := readyForLogger(rd); fields != nil {
-			rc.raftLogger.Info(fields...)
-		}
-
-		if !raft.IsEmptyHardState(rd.HardState) {
-			hardState = rd.HardState
-		}
-
-		if rd.SoftState != nil {
-			from := raftState
-			to := rd.SoftState.RaftState
-			rc.eventLogger.Infof("soft state changed from %s to %s, term: %d",
-				raftState, rd.SoftState.RaftState, hardState.Term)
-			raftState = rd.SoftState.RaftState
-			leader = PeerID(rd.SoftState.Lead)
-			if from != raft.StateLeader && to == raft.StateLeader {
-				rc.executor.OnLeaderStart(hardState.Term)
-			} else if from == raft.StateLeader && to != raft.StateLeader {
-				rc.executor.OnLeaderStop()
-			}
-		}
-
-		// save snapshot first. if HardState.Commit is saved and snapshot apply failed,
-		// it will panic on next start.
-		if !raft.IsEmptySnap(rd.Snapshot) {
-			objSrcName := leader
-			if raftState == raft.StateLeader {
-				objSrcName = PeerID(0)
-			}
-			if err := rc.executor.ApplySnapshot(rd.Snapshot, objSrcName); err != nil {
-				rc.raftLogger.Warning("apply snapshot failed, err: ", err)
-				return err
-			}
-			rc.fetchingSnapshot = false
-		}
-
-		if err := rc.storage.Save(rd.HardState, rd.Entries, rd.MustSync); err != nil {
-			rc.raftLogger.Warning("persistent failed, err: ", err)
-			return err
-		}
-
-		rc.transport.Send(rd.Messages)
-
-		for i := range rd.CommittedEntries {
-			entry := &rd.CommittedEntries[i]
-			if err := rc.executor.AppendEntry(entry); err != nil {
-				rc.raftLogger.Warning("append entry failed, index: ", entry.Index, ", err: ", err)
-				return err
-			}
-		}
-
-		select {
-		case rc.advanceC <- struct{}{}:
-		case <-rc.stopC:
-			return nil
-		}
-	}
-}
-
-func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
+func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.Duration) error {
 	ticker := time.NewTicker(d)
 	defer ticker.Stop()
 
@@ -352,7 +190,7 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 			raftState = rd.SoftState.RaftState
 		}
 		handlingReady = *rd
-		advanceC = rc.advanceC
+		advanceC = rc.readyHandler.AdvanceC()
 		readyCh <- rd
 		readyCh = make(chan *raft.Ready, 1)
 	}
@@ -360,11 +198,11 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 	for {
 
 		var propC <-chan *msgWithResult
-		var readyC chan (<-chan *raft.Ready)
+		var readyC chan<- <-chan *raft.Ready
 
 		if advanceC == nil {
 			if node.HasReady() {
-				readyC = rc.readyC
+				readyC = rc.readyHandler.ReadyC()
 			} else {
 				propC = rc.propC
 			}
@@ -381,21 +219,23 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 
 		case msg := <-propC:
 
-			if raftState != raft.StateLeader {
-				err := fmt.Errorf("state is %s, cant propose", raftState)
-				reportErrToMsg(msg, err)
-				break
-			}
+			if err := func() error {
+				if raftState != raft.StateLeader {
+					return fmt.Errorf("state is %s, cant propose", raftState)
+				}
 
-			if msg.expectedTerm != 0 && msg.expectedTerm != hardState.Term {
-				err := fmt.Errorf("term not match, expected: %d, actual: %d",
-					msg.expectedTerm, hardState.Term)
-				reportErrToMsg(msg, err)
-				break
-			}
+				if msg.expectedTerm != 0 && msg.expectedTerm != hardState.Term {
+					return fmt.Errorf("term not match, expected: %d, actual: %d",
+						msg.expectedTerm, hardState.Term)
+				}
 
-			if err := node.Propose(msg.data); err != nil {
-				reportErrToMsg(msg, err)
+				if err := node.Propose(msg.data); err != nil {
+					return err
+				}
+
+				return nil
+			}(); err != nil {
+				msg.Error(err)
 				break
 			}
 
@@ -410,13 +250,20 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 					entry.Term, hardState.Term)
 			}
 
-			rc.executor.AddContext(entry.Term, entry.Index, msg.resCh)
+			rc.doingRequest.Store(entry.Index, termAndResult{
+				term:   entry.Term,
+				result: msg.resCh,
+			})
 			msg.idxCh <- entry.Index
 
 			select {
-			case rc.readyC <- readyCh:
+			case rc.readyHandler.ReadyC() <- readyCh:
 				sendReady(&rd)
-			case <-rc.stopC:
+
+			case <-rc.readyHandler.Done():
+				return nil
+
+			case <-stopC:
 				return nil
 			}
 
@@ -429,17 +276,13 @@ func (rc *raftNode) serveRaft(node *raft.RawNode, d time.Duration) error {
 			handlingReady = raft.Ready{}
 			advanceC = nil
 
-		case err := <-rc.transport.ErrorC:
-			rc.raftLogger.Warning("transport stopped, err: ", err)
-			return err
-
 		case fn := <-rc.funcC:
 			fn(node)
 
-		case <-rc.readyDoneC:
-			return rc.readyResult
+		case <-rc.readyHandler.Done():
+			return nil
 
-		case <-rc.stopC:
+		case <-stopC:
 			return nil
 		}
 	}
@@ -452,15 +295,9 @@ func (rc *raftNode) Handler() http.Handler {
 }
 
 func (rc *raftNode) InitRouter(mux *http.ServeMux) {
-	rh := rc.transport.Handler()
-	mux.Handle("/raft", rh)
-	mux.Handle("/raft/", rh)
-	mux.HandleFunc("/raft/wal", rc.getWAL)
-	mux.HandleFunc("/raft/snapshot", rc.getSnapshot)
+	rc.readyHandler.InitRouter(mux)
 	mux.HandleFunc("/raft/status", rc.getStatus)
 	mux.HandleFunc("/raft/campaign", rc.campaign)
-	mux.HandleFunc("/raft/server_stat", rc.getServerStat)
-	mux.HandleFunc("/raft/leader_stat", rc.getLeaderStat)
 	mux.HandleFunc("/raft/members", rc.getMemberStatus)
 	mux.HandleFunc("/raft/members/", rc.confChange)
 }
@@ -476,10 +313,7 @@ func (rc *raftNode) withPipeline(ctx context.Context, fn func(node *raft.RawNode
 		return <-ch
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-rc.raftDoneC:
-		if rc.raftResult != nil {
-			return rc.raftResult
-		}
+	case <-rc.raftRunner.Done():
 		return ErrStopped
 	}
 }
@@ -571,10 +405,7 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 		defer func() { close(resCh) }()
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-rc.raftDoneC:
-		if rc.raftResult != nil {
-			return rc.raftResult
-		}
+	case <-rc.raftRunner.Done():
 		return ErrStopped
 	}
 
@@ -590,15 +421,12 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 			return err
 		}
 		index = i
-		defer rc.executor.DeleteContext(index)
-	case <-rc.raftDoneC:
-		if rc.raftResult != nil {
-			return rc.raftResult
-		}
+		defer rc.doingRequest.Delete(index)
+	case <-rc.raftRunner.Done():
 		return ErrStopped
 	}
 
-	done := make(chan error)
+	done := make(chan error, 1)
 
 	rc.eventLogger.Info("proposed, index: ", index, ", opcnt: ", len(oplog.Ops),
 		", expectedTerm: ", msg.expectedTerm)
@@ -610,10 +438,7 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 		return <-done
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-rc.raftDoneC:
-		if rc.raftResult != nil {
-			return rc.raftResult
-		}
+	case <-rc.raftRunner.Done():
 		return ErrStopped
 	}
 }
@@ -647,10 +472,10 @@ func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 	return rc.withPipeline(ctx, func(node *raft.RawNode) error {
 		switch m.Type {
 		case pb.MsgHeartbeat:
-			if lastWAL, err := rc.storage.LastIndex(); err != nil {
+			if lastWAL, err := rc.readyHandler.GetLastIndex(); err != nil {
 				return err
 			} else if m.Commit > lastWAL {
-				if rc.fetchingSnapshot {
+				if rc.readyHandler.IsFetchingSnapshot() {
 					m.Commit = 0
 					break
 				}
@@ -663,7 +488,7 @@ func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 					m.Commit = 0
 					break
 				}
-				rc.fetchingSnapshot = true
+				rc.readyHandler.SetFetchingSnapshot()
 				m = pb.Message{
 					From:     m.From,
 					To:       m.To,
@@ -707,27 +532,18 @@ func (rc *raftNode) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 	})
 }
 
-func (rc *raftNode) getSnapshot(w http.ResponseWriter, r *http.Request) {
-	snapshot, err := rc.storage.Snapshot()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	pb, err := snapshot.Marshal()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/x-protobuf")
-	w.Header().Set("Content-Length", strconv.Itoa(len(pb)))
-	w.Write(pb)
-}
-
 func (rc *raftNode) campaign(w http.ResponseWriter, r *http.Request) {
 	err := rc.withPipeline(r.Context(), func(node *raft.RawNode) error {
 		return node.Campaign()
 	})
 	fmt.Fprint(w, err)
+}
+
+func (rc *raftNode) applyConfChange(cc pb.ConfChange) (*pb.ConfState, error) {
+	var state *pb.ConfState
+	err := rc.withPipeline(context.Background(), func(node *raft.RawNode) error {
+		state = node.ApplyConfChange(cc)
+		return nil
+	})
+	return state, err
 }

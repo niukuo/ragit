@@ -17,7 +17,7 @@ import (
 	tracker "go.etcd.io/etcd/raft"
 )
 
-func (rc *raftNode) getWAL(w http.ResponseWriter, r *http.Request) {
+func (rc *readyHandler) getWAL(w http.ResponseWriter, r *http.Request) {
 	var first uint64 = 1
 	var count uint64 = 100
 	var maxSize uint64 = 1048576
@@ -96,8 +96,8 @@ func (rc *raftNode) getWAL(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, str)
 }
 
-func (rc *raftNode) getServerStat(w http.ResponseWriter, r *http.Request) {
-	stat := json.RawMessage(rc.serverStats.JSON())
+func (rc *readyHandler) getServerStat(w http.ResponseWriter, r *http.Request) {
+	stat := json.RawMessage(rc.transport.ServerStats.JSON())
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	encoder.SetEscapeHTML(false)
@@ -105,9 +105,9 @@ func (rc *raftNode) getServerStat(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func (rc *raftNode) getLeaderStat(w http.ResponseWriter, r *http.Request) {
+func (rc *readyHandler) getLeaderStat(w http.ResponseWriter, r *http.Request) {
 	var stat map[string]json.RawMessage
-	if err := json.Unmarshal(rc.leaderStats.JSON(), &stat); err != nil {
+	if err := json.Unmarshal(rc.transport.LeaderStats.JSON(), &stat); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -149,16 +149,42 @@ func (rc *raftNode) getLeaderStat(w http.ResponseWriter, r *http.Request) {
 func (rc *raftNode) getStatus(w http.ResponseWriter, r *http.Request) {
 
 	status := (*raft.SoftState)(atomic.LoadPointer(&rc.softState))
-	if err := rc.raftResult; err != nil {
-		fmt.Fprintln(w, "state: err,", err)
-	} else if status != nil {
-		fmt.Fprintln(w, "state:", status.RaftState)
-		fmt.Fprintln(w, "leader:", PeerID(status.Lead))
-	} else {
-		fmt.Fprintln(w, "state: init")
+
+	select {
+	case <-rc.raftRunner.Done():
+		err := rc.raftRunner.Error()
+		fmt.Fprintln(w, "state: stopped, err:", err)
+	default:
+		if status != nil {
+			fmt.Fprintln(w, "state:", status.RaftState)
+			fmt.Fprintln(w, "leader:", PeerID(status.Lead))
+		} else {
+			fmt.Fprintln(w, "state: init")
+		}
 	}
-	rc.storage.Describe(w)
-	rc.executor.Describe(w)
+
+	rc.readyHandler.Describe(w)
+
+	type Doing struct {
+		index uint64
+		term  uint64
+	}
+	doings := make([]Doing, 0)
+	rc.doingRequest.Range(func(key interface{}, value interface{}) bool {
+		doings = append(doings, Doing{
+			index: key.(uint64),
+			term:  value.(termAndResult).term,
+		})
+		return true
+	})
+	sort.Slice(doings, func(i, j int) bool {
+		return doings[i].index < doings[j].index
+	})
+	fmt.Fprintln(w, "proposing:", len(doings))
+	for _, doing := range doings {
+		fmt.Fprintf(w, "  term: %d, index: %d\n", doing.term, doing.index)
+	}
+
 	if status == nil || status.RaftState != raft.StateLeader {
 		return
 	}
