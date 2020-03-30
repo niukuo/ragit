@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -146,13 +147,17 @@ func (rc *readyHandler) getLeaderStat(w http.ResponseWriter, r *http.Request) {
 	encoder.Encode(stat)
 }
 
-func (rc *raftNode) getStatus(w http.ResponseWriter, r *http.Request) {
+func (rc *readyHandler) getStatus(w http.ResponseWriter, r *http.Request) {
+	rc.raft.Describe(w)
+	rc.storage.Describe(w)
+}
 
+func (rc *raftNode) Describe(w io.Writer) {
 	status := (*raft.SoftState)(atomic.LoadPointer(&rc.softState))
 
 	select {
-	case <-rc.raftRunner.Done():
-		err := rc.raftRunner.Error()
+	case <-rc.Runner.Done():
+		err := rc.Runner.Error()
 		fmt.Fprintln(w, "state: stopped, err:", err)
 	default:
 		if status != nil {
@@ -163,27 +168,7 @@ func (rc *raftNode) getStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rc.readyHandler.Describe(w)
-
-	type Doing struct {
-		index uint64
-		term  uint64
-	}
-	doings := make([]Doing, 0)
-	rc.doingRequest.Range(func(key interface{}, value interface{}) bool {
-		doings = append(doings, Doing{
-			index: key.(uint64),
-			term:  value.(termAndResult).term,
-		})
-		return true
-	})
-	sort.Slice(doings, func(i, j int) bool {
-		return doings[i].index < doings[j].index
-	})
-	fmt.Fprintln(w, "proposing:", len(doings))
-	for _, doing := range doings {
-		fmt.Fprintf(w, "  term: %d, index: %d\n", doing.term, doing.index)
-	}
+	rc.requests.Describe(w)
 
 	if status == nil || status.RaftState != raft.StateLeader {
 		return
@@ -196,7 +181,7 @@ func (rc *raftNode) getStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	replicators := make([]ReplicaStatus, 0)
 
-	ctx, cancel := context.WithTimeout(r.Context(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	if err := rc.withPipeline(ctx, func(node *raft.RawNode) error {
 		node.WithProgress(func(id uint64, typ raft.ProgressType, pr tracker.Progress) {

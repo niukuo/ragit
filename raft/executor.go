@@ -25,7 +25,7 @@ type Executor interface {
 type executor struct {
 	sm StateMachine
 
-	node Node
+	raft Raft
 
 	entryCh chan *pb.Entry
 	fnCh    chan func()
@@ -38,7 +38,7 @@ type executor struct {
 }
 
 func StartExecutor(
-	node Node,
+	raft Raft,
 	sm StateMachine,
 	dataIndex uint64,
 ) (Executor, error) {
@@ -48,7 +48,7 @@ func StartExecutor(
 	}
 
 	e := &executor{
-		node: node,
+		raft: raft,
 
 		sm: sm,
 
@@ -132,10 +132,16 @@ func (e *executor) Run(stopC <-chan struct{}) error {
 
 func (e *executor) applyEntry(entry *pb.Entry) (err error) {
 	ctx := context.Background()
-	if res, ok := e.node.getContext(entry.Term, entry.Index); ok {
+	res, err := e.raft.getContext(entry.Term, entry.Index)
+	if err != nil {
+		return err
+	}
+
+	if res != nil {
 		ctx = res.context
 		defer func() { res.done <- err }()
 	}
+
 	var oplog refs.Oplog
 	if err := proto.Unmarshal(entry.Data, &oplog); err != nil {
 		return err

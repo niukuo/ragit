@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -26,9 +26,10 @@ var ErrStopped = errors.New("stopped")
 type msgWithResult struct {
 	expectedTerm uint64
 	data         []byte
-	idxCh        chan<- uint64
-	err          error
 	resCh        <-chan applyResult
+
+	err   error
+	idxCh chan<- uint64
 }
 
 type applyResult struct {
@@ -36,22 +37,22 @@ type applyResult struct {
 	done    chan<- error
 }
 
-type termAndResult struct {
-	term   uint64
-	result <-chan applyResult
-}
-
-// A key-value stream backed by raft
-type Node interface {
+type Raft interface {
 	rafthttp.Raft
 
-	getContext(term, index uint64) (*applyResult, bool)
-	applyConfChange(cc pb.ConfChange) (*pb.ConfState, error)
+	Runner
+	Start(node *raft.RawNode, readyHandler ReadyHandler, d time.Duration)
 
-	Handler() http.Handler
 	InitRouter(mux *http.ServeMux)
-	Propose(ctx context.Context, oplog refs.Oplog) error
-	GetStatus(ctx context.Context) (*Status, error)
+
+	Propose(ctx context.Context, oplog refs.Oplog) (AsyncHandle, error)
+
+	getContext(term, index uint64) (*applyResult, error)
+	applyConfChange(confState pb.ConfChange) (*pb.ConfState, error)
+
+	withPipeline(ctx context.Context, fn func(node *raft.RawNode) error) error
+
+	Describe(w io.Writer)
 }
 
 type raftNode struct {
@@ -61,98 +62,49 @@ type raftNode struct {
 
 	softState unsafe.Pointer
 
-	// map[index]termAndResult
-	doingRequest sync.Map
+	requests RequestContextManager
 
 	readyHandler ReadyHandler
-	raftRunner   Runner
+
+	Runner
 
 	raftLogger  logging.Logger
 	eventLogger logging.Logger
 }
 
-func RunNode(c Config) (Node, error) {
-
-	id := PeerID(c.ID)
-
-	state, err := c.Storage.GetInitState()
-	if err != nil {
-		return nil, err
-	}
-
-	c.Config.DisableProposalForwarding = true
-	c.Config.Applied = state.AppliedIndex
-
-	node, err := raft.NewRawNode(&c.Config, nil)
-	if err != nil {
-		return nil, err
-	}
+func NewRaft(config *raft.Config) Raft {
 
 	rc := &raftNode{
 		confChangeC: make(chan pb.ConfChange),
 		propC:       make(chan *msgWithResult),
 		funcC:       make(chan func(node *raft.RawNode)),
 
+		requests: NewRequestContextManager(),
+
 		raftLogger:  logging.GetLogger("raft"),
 		eventLogger: logging.GetLogger("event"),
 	}
 
-	rc.raftLogger.Info("starting raft instance, applied_index: ", state.AppliedIndex,
-		", committed_index: ", state.HardState.Commit,
-		", conf_index: ", state.ConfIndex,
-		", conf_state: ", state.ConfState)
+	return rc
+}
 
-	readyHandler, err := StartReadyHandler(
-		c.ClusterID,
-		id,
-		rc,
-		c.Storage,
-		c.StateMachine,
-		state,
-	)
-	if err != nil {
-		return nil, err
-	}
+func (rc *raftNode) Start(
+	node *raft.RawNode,
+	readyHandler ReadyHandler,
+	d time.Duration,
+) {
 
 	rc.readyHandler = readyHandler
 
-	rc.raftRunner = StartRunner(func(stopC <-chan struct{}) error {
-		e := rc.serveRaft(stopC, node, c.TickDuration)
-		rc.eventLogger.Warning("node stopped, stopping ready handler. err: ", e)
-
-		rc.readyHandler.Stop()
-		<-rc.readyHandler.Done()
-		if err := rc.readyHandler.Error(); err != nil {
-			e = err
-		}
-
-		return e
+	rc.Runner = StartRunner(func(stopC <-chan struct{}) error {
+		err := rc.serveRaft(stopC, node, d)
+		rc.requests.Clear(ErrStopped)
+		return err
 	})
-
-	return rc, nil
 }
 
-func (rc *raftNode) getContext(term, index uint64) (*applyResult, bool) {
-	v, ok := rc.doingRequest.Load(index)
-	if !ok {
-		return nil, false
-	}
-
-	tr := v.(termAndResult)
-	res, ok := <-tr.result
-	if !ok {
-		return nil, false
-	}
-
-	if tr.term != term {
-		res.done <- &errTermChanged{
-			proposedTerm:  tr.term,
-			committedTerm: term,
-		}
-		return nil, false
-	}
-
-	return &res, true
+func (rc *raftNode) getContext(term, index uint64) (*applyResult, error) {
+	return rc.requests.Take(term, index)
 }
 
 func (msg *msgWithResult) Error(err error) {
@@ -160,53 +112,23 @@ func (msg *msgWithResult) Error(err error) {
 	close(msg.idxCh)
 }
 
-func (rc *raftNode) Stop() error {
-	rc.raftRunner.Stop()
-	<-rc.raftRunner.Done()
-	if err := rc.raftRunner.Error(); err != nil {
-		return err
-	}
-	return nil
-}
-
 func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.Duration) error {
 	ticker := time.NewTicker(d)
 	defer ticker.Stop()
 
-	confChangeCount := uint64(0)
-	// event loop on raft state machine updates
+	var term uint64
+	var nextIndex uint64
 
-	var hardState pb.HardState
-	raftState := raft.StateFollower
-	var handlingReady raft.Ready
+	var rd raft.Ready
 	var advanceC <-chan struct{}
 	readyCh := make(chan *raft.Ready, 1)
 
-	sendReady := func(rd *raft.Ready) {
-		if !raft.IsEmptyHardState(rd.HardState) {
-			hardState = rd.HardState
-		}
-		if rd.SoftState != nil {
-			atomic.StorePointer(&rc.softState, unsafe.Pointer(rd.SoftState))
-			raftState = rd.SoftState.RaftState
-		}
-		handlingReady = *rd
-		advanceC = rc.readyHandler.AdvanceC()
-		readyCh <- rd
-		readyCh = make(chan *raft.Ready, 1)
-	}
-
 	for {
 
-		var propC <-chan *msgWithResult
 		var readyC chan<- <-chan *raft.Ready
 
-		if advanceC == nil {
-			if node.HasReady() {
-				readyC = rc.readyHandler.ReadyC()
-			} else {
-				propC = rc.propC
-			}
+		if advanceC == nil && node.HasReady() {
+			readyC = rc.readyHandler.ReadyC()
 		}
 
 		select {
@@ -214,25 +136,37 @@ func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.
 			node.Tick()
 
 		case cc := <-rc.confChangeC:
-			confChangeCount++
-			cc.ID = confChangeCount
-			node.ProposeConfChange(cc)
+			if nextIndex == 0 {
+				break
+			}
+			cc.ID = nextIndex
+			if err := node.ProposeConfChange(cc); err == nil {
+				nextIndex++
+			}
 
-		case msg := <-propC:
+		case msg := <-rc.propC:
 
 			if err := func() error {
-				if raftState != raft.StateLeader {
-					return fmt.Errorf("state is %s, cant propose", raftState)
+				if nextIndex == 0 {
+					return fmt.Errorf("not leader, cant propose")
 				}
 
-				if msg.expectedTerm != 0 && msg.expectedTerm != hardState.Term {
+				if msg.expectedTerm != 0 && msg.expectedTerm != term {
 					return fmt.Errorf("term not match, expected: %d, actual: %d",
-						msg.expectedTerm, hardState.Term)
+						msg.expectedTerm, term)
 				}
 
 				if err := node.Propose(msg.data); err != nil {
 					return err
 				}
+
+				index := nextIndex
+				nextIndex++
+
+				if err := rc.requests.Append(term, index, msg.resCh); err != nil {
+					return err
+				}
+				msg.idxCh <- index
 
 				return nil
 			}(); err != nil {
@@ -240,41 +174,53 @@ func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.
 				break
 			}
 
-			// hack: just want to know term and index
-			//TODO: node.readyWithoutAccept
-			rd := node.Ready()
-
-			entry := &rd.Entries[len(rd.Entries)-1]
-
-			if entry.Term != hardState.Term {
-				return fmt.Errorf("proposed term(%d) not equal to hardstate.term(%d)???",
-					entry.Term, hardState.Term)
-			}
-
-			rc.doingRequest.Store(entry.Index, termAndResult{
-				term:   entry.Term,
-				result: msg.resCh,
-			})
-			msg.idxCh <- entry.Index
-
-			select {
-			case rc.readyHandler.ReadyC() <- readyCh:
-				sendReady(&rd)
-
-			case <-rc.readyHandler.Done():
-				return nil
-
-			case <-stopC:
-				return nil
-			}
-
 		case readyC <- readyCh:
-			rd := node.Ready()
-			sendReady(&rd)
+			rd = node.Ready()
+
+			if !raft.IsEmptyHardState(rd.HardState) {
+				term = rd.HardState.Term
+			}
+
+			if rd.SoftState != nil {
+				if rd.SoftState.RaftState == raft.StateLeader {
+					index := rd.Entries[len(rd.Entries)-1].Index + 1
+					if nextIndex != 0 && nextIndex != index {
+						err := fmt.Errorf("next_index mismatch, expected: %d, actual: %d",
+							nextIndex, index)
+						rc.eventLogger.Error(err)
+						return err
+					}
+					rc.eventLogger.Infof("become leader at term %d, next_index: %d",
+						term, index)
+					nextIndex = index
+				} else if nextIndex != 0 {
+					rc.eventLogger.Warningf("lost leader, next_index: %d", nextIndex)
+					nextIndex = 0
+				} else {
+					rc.eventLogger.Infof("state: %s, leader: %s",
+						rd.SoftState.RaftState, PeerID(rd.SoftState.Lead))
+				}
+				atomic.StorePointer(&rc.softState, unsafe.Pointer(rd.SoftState))
+			}
+
+			if l := len(rd.Entries); nextIndex != 0 && l != 0 {
+				if actual := rd.Entries[l-1].Index + 1; nextIndex != actual {
+					err := fmt.Errorf("next_index check failed, expected: %d, actual: %d",
+						nextIndex, actual)
+					rc.eventLogger.Error(err)
+					return err
+				}
+			}
+
+			advanceC = rc.readyHandler.AdvanceC()
+			readyCh <- &rd
+			readyCh = make(chan *raft.Ready, 1)
+
+			rc.requests.Check(rd.Entries)
 
 		case <-advanceC:
-			node.Advance(handlingReady)
-			handlingReady = raft.Ready{}
+			node.Advance(rd)
+			rd = raft.Ready{}
 			advanceC = nil
 
 		case fn := <-rc.funcC:
@@ -289,15 +235,7 @@ func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.
 	}
 }
 
-func (rc *raftNode) Handler() http.Handler {
-	mux := http.NewServeMux()
-	rc.InitRouter(mux)
-	return mux
-}
-
 func (rc *raftNode) InitRouter(mux *http.ServeMux) {
-	rc.readyHandler.InitRouter(mux)
-	mux.HandleFunc("/raft/status", rc.getStatus)
 	mux.HandleFunc("/raft/campaign", rc.campaign)
 	mux.HandleFunc("/raft/members", rc.getMemberStatus)
 	mux.HandleFunc("/raft/members/", rc.confChange)
@@ -314,34 +252,22 @@ func (rc *raftNode) withPipeline(ctx context.Context, fn func(node *raft.RawNode
 		return <-ch
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-rc.raftRunner.Done():
+	case <-rc.Runner.Done():
 		return ErrStopped
 	}
 }
 
-func (rc *raftNode) GetStatus(ctx context.Context) (*Status, error) {
-	var status Status
-
-	fn := func(node *raft.RawNode) error {
-		status = Status(*node.Status())
-		return nil
-	}
-
-	if err := rc.withPipeline(ctx, fn); err != nil {
-		return nil, err
-	}
-
-	return &status, nil
-}
-
 func (rc *raftNode) getMemberStatus(w http.ResponseWriter, r *http.Request) {
-	status, err := rc.GetStatus(r.Context())
-	if err != nil {
+
+	var memberStatus *MemberStatus
+
+	if err := rc.withPipeline(r.Context(), func(node *raft.RawNode) error {
+		memberStatus = (*Status)(node.Status()).MemberStatus()
+		return nil
+	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	memberStatus := status.MemberStatus()
 
 	encoder := json.NewEncoder(w)
 	encoder.SetEscapeHTML(false)
@@ -378,14 +304,14 @@ func (rc *raftNode) confChange(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
+func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) (AsyncHandle, error) {
 	if err := refs.Validate(oplog); err != nil {
-		return err
+		return nil, err
 	}
 
 	content, err := proto.Marshal(&oplog)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	idxCh := make(chan uint64, 1)
@@ -393,8 +319,9 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 
 	msg := msgWithResult{
 		data:  content,
-		idxCh: idxCh,
 		resCh: resCh,
+
+		idxCh: idxCh,
 	}
 
 	if v := ctx.Value(CtxExpectedTermKey); v != nil {
@@ -403,45 +330,30 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) error {
 
 	select {
 	case rc.propC <- &msg:
-		defer func() { close(resCh) }()
 	case <-ctx.Done():
-		return ctx.Err()
-	case <-rc.raftRunner.Done():
-		return ErrStopped
+		return nil, ctx.Err()
+	case <-rc.Runner.Done():
+		return nil, ErrStopped
 	}
 
-	var index uint64
+	handle := asyncHandle{
+		resCh: resCh,
+	}
 
-	select {
-	case i, ok := <-idxCh:
-		if !ok {
-			err := msg.err
-			if err == nil {
-				err = errors.New("propose failed")
-			}
-			return err
+	if i, ok := <-idxCh; !ok {
+		err := msg.err
+		if err == nil {
+			err = errors.New("propose failed")
 		}
-		index = i
-		defer rc.doingRequest.Delete(index)
-	case <-rc.raftRunner.Done():
-		return ErrStopped
+		return nil, err
+	} else {
+		handle.index = i
 	}
 
-	done := make(chan error, 1)
-
-	rc.eventLogger.Info("proposed, index: ", index, ", opcnt: ", len(oplog.Ops),
+	rc.eventLogger.Info("proposed, index: ", handle.index, ", opcnt: ", len(oplog.Ops),
 		", expectedTerm: ", msg.expectedTerm)
-	select {
-	case resCh <- applyResult{
-		context: ctx,
-		done:    done,
-	}:
-		return <-done
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-rc.raftRunner.Done():
-		return ErrStopped
-	}
+
+	return &handle, nil
 }
 
 func getSnapshot(src PeerID) (*pb.Snapshot, error) {

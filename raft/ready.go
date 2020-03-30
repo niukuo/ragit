@@ -1,8 +1,8 @@
 package raft
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -22,8 +22,6 @@ type ReadyHandler interface {
 
 	InitRouter(mux *http.ServeMux)
 
-	Describe(w io.Writer)
-
 	ReadyC() chan<- <-chan *raft.Ready
 	AdvanceC() <-chan struct{}
 	IsFetchingSnapshot() bool
@@ -34,40 +32,51 @@ type ReadyHandler interface {
 type readyHandler struct {
 	id refs.PeerID
 
-	node Node
+	storage Storage
 
 	transport *rafthttp.Transport
 
-	storage Storage
+	raft             Raft
+	readyC           chan (<-chan *raft.Ready)
+	advanceC         chan struct{}
+	fetchingSnapshot int32
 
-	readyC   chan (<-chan *raft.Ready)
-	advanceC chan struct{}
+	executor  Executor
+	confIndex uint64
 
 	Runner
-
-	executor         Executor
-	confIndex        uint64
-	fetchingSnapshot int32
 
 	raftLogger  logging.Logger
 	eventLogger logging.Logger
 }
 
-func StartReadyHandler(
-	clusterID types.ID,
-	id PeerID,
-	node Node,
-	storage Storage,
-	sm StateMachine,
-	state *InitialState,
-) (ReadyHandler, error) {
+func RunNode(c Config) (Node, error) {
+
+	id := PeerID(c.ID)
+
+	state, err := c.Storage.GetInitState()
+	if err != nil {
+		return nil, err
+	}
+
+	c.Config.DisableProposalForwarding = true
+	c.Config.Applied = state.AppliedIndex
+
+	node, err := raft.NewRawNode(&c.Config, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	r := NewRaft(&c.Config)
+
+	sm := c.StateMachine
 
 	transport := &rafthttp.Transport{
 		Logger:      zap.NewNop(),
 		ID:          types.ID(id),
 		URLs:        types.MustNewURLs([]string{"http://" + id.Addr()}),
-		ClusterID:   clusterID,
-		Raft:        node,
+		ClusterID:   c.ClusterID,
+		Raft:        r,
 		ServerStats: stats.NewServerStats(id.String(), id.String()),
 		LeaderStats: stats.NewLeaderStats(id.String()),
 		ErrorC:      make(chan error, 1),
@@ -85,29 +94,35 @@ func StartReadyHandler(
 		transport.AddPeer(types.ID(peerid), []string{"http://" + peerid.Addr()})
 	}
 
+	executor, err := StartExecutor(r, sm, state.AppliedIndex)
+	if err != nil {
+		return nil, err
+	}
+
 	rc := &readyHandler{
-		id:   id,
-		node: node,
+		id: id,
+
+		storage: c.Storage,
 
 		transport: transport,
 
-		storage: storage,
-
+		raft:     r,
 		readyC:   make(chan (<-chan *raft.Ready)),
 		advanceC: make(chan struct{}),
 
+		executor:  executor,
 		confIndex: state.ConfIndex,
 
 		raftLogger:  logging.GetLogger("ready"),
 		eventLogger: logging.GetLogger("event.ready"),
 	}
 
-	executor, err := StartExecutor(node, sm, state.AppliedIndex)
-	if err != nil {
-		return nil, err
-	}
+	rc.raftLogger.Info("starting raft instance, applied_index: ", state.AppliedIndex,
+		", committed_index: ", state.HardState.Commit,
+		", conf_index: ", state.ConfIndex,
+		", conf_state: ", state.ConfState)
 
-	rc.executor = executor
+	r.Start(node, rc, c.TickDuration)
 
 	rc.Runner = StartRunner(func(stopC <-chan struct{}) error {
 		e := rc.serveReady(stopC)
@@ -117,8 +132,13 @@ func StartReadyHandler(
 
 		rc.transport.Stop()
 
-		<-rc.executor.Done()
+		rc.raft.Stop()
+		<-rc.raft.Done()
+		if err := rc.raft.Error(); err != nil {
+			e = err
+		}
 
+		<-rc.executor.Done()
 		if err := rc.executor.Error(); err != nil {
 			e = err
 		}
@@ -226,7 +246,11 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			return nil
 
 		case ch := <-rc.readyC:
-			rd = <-ch
+			select {
+			case rd = <-ch:
+			case <-stopC:
+				return nil
+			}
 		}
 
 		if fields := readyForLogger(rd); fields != nil {
@@ -240,9 +264,7 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 		if rd.SoftState != nil {
 			from := raftState
 			to := rd.SoftState.RaftState
-			rc.eventLogger.Infof("soft state changed from %s to %s, term: %d",
-				raftState, rd.SoftState.RaftState, hardState.Term)
-			raftState = rd.SoftState.RaftState
+			raftState = to
 			leader = PeerID(rd.SoftState.Lead)
 			if from != raft.StateLeader && to == raft.StateLeader {
 				rc.executor.OnLeaderStart(hardState.Term)
@@ -256,8 +278,8 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 		if !raft.IsEmptySnap(rd.Snapshot) {
 			snap := rd.Snapshot
 			objSrcName := leader
-			if raftState == raft.StateLeader {
-				objSrcName = PeerID(0)
+			if objSrcName == rc.id {
+				objSrcName = 0
 			}
 			if err := rc.executor.OnSnapshot(rd.Snapshot, objSrcName); err != nil {
 				rc.raftLogger.Warning("apply snapshot failed, err: ", err)
@@ -319,7 +341,7 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 			return err
 		}
 
-		confState, err := rc.node.applyConfChange(cc)
+		confState, err := rc.raft.applyConfChange(cc)
 		if err != nil {
 			return err
 		}
@@ -372,14 +394,22 @@ func (rc *readyHandler) GetLastIndex() (uint64, error) {
 	return rc.storage.LastIndex()
 }
 
+func (rc *readyHandler) Handler() http.Handler {
+	mux := http.NewServeMux()
+	rc.InitRouter(mux)
+	return mux
+}
+
 func (rc *readyHandler) InitRouter(mux *http.ServeMux) {
 	rh := rc.transport.Handler()
 	mux.Handle("/raft", rh)
 	mux.Handle("/raft/", rh)
+	mux.HandleFunc("/raft/status", rc.getStatus)
 	mux.HandleFunc("/raft/wal", rc.getWAL)
 	mux.HandleFunc("/raft/snapshot", rc.getSnapshot)
 	mux.HandleFunc("/raft/server_stat", rc.getServerStat)
 	mux.HandleFunc("/raft/leader_stat", rc.getLeaderStat)
+	rc.raft.InitRouter(mux)
 }
 
 func (rc *readyHandler) getSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -400,6 +430,31 @@ func (rc *readyHandler) getSnapshot(w http.ResponseWriter, r *http.Request) {
 	w.Write(pb)
 }
 
-func (rc *readyHandler) Describe(w io.Writer) {
-	rc.storage.Describe(w)
+func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog) error {
+
+	handle, err := rc.raft.Propose(ctx, oplog)
+	if err != nil {
+		return err
+	}
+
+	if err := handle.Wait(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (rc *readyHandler) GetStatus(ctx context.Context) (*Status, error) {
+	var status Status
+
+	fn := func(node *raft.RawNode) error {
+		status = Status(*node.Status())
+		return nil
+	}
+
+	if err := rc.raft.withPipeline(ctx, fn); err != nil {
+		return nil, err
+	}
+
+	return &status, nil
 }
