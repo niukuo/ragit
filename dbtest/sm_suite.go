@@ -51,7 +51,7 @@ func (s *SMSuite) TestApply() {
 	state, err := s.storage.GetInitState()
 	s.NoError(err)
 	s.True(raft.IsEmptyHardState(state.HardState))
-	s.Len(state.Peers, 0)
+	s.Len(state.ConfState.Nodes, 0)
 
 	s.checkIndex(0, 0)
 

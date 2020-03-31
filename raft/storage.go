@@ -3,7 +3,6 @@ package raft
 import (
 	"io"
 
-	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/raft"
 	pb "go.etcd.io/etcd/raft/raftpb"
 )
@@ -12,7 +11,7 @@ type InitialState struct {
 	HardState    pb.HardState
 	AppliedIndex uint64
 
-	Peers     []refs.PeerID
+	ConfState pb.ConfState
 	ConfIndex uint64
 }
 

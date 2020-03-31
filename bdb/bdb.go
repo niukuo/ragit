@@ -552,20 +552,12 @@ func (s *storage) GetInitState() (*ragit.InitialState, error) {
 		stateb := tx.Bucket(BucketState)
 		metab := tx.Bucket(BucketMeta)
 
-		var confState pb.ConfState
-
 		if err := getInitState(
 			stateb, &state.HardState,
-			metab, &confState,
+			metab, &state.ConfState,
 		); err != nil {
 			return err
 		}
-
-		peers := make([]refs.PeerID, 0, len(confState.Nodes))
-		for _, peer := range confState.Nodes {
-			peers = append(peers, refs.PeerID(peer))
-		}
-		state.Peers = peers
 
 		getUint64(metab, map[string]*uint64{
 			"conf_index": &state.ConfIndex,
@@ -671,7 +663,7 @@ func (s *storage) Describe(w io.Writer) {
 				"index":      &index,
 				"conf_index": &confIndex,
 			})
-			fmt.Fprintln(w, "disk_conf_index:", confIndex)
+			fmt.Fprintln(w, "conf_index:", confIndex)
 
 			var confState pb.ConfState
 			if err := confState.Unmarshal(metab.Get([]byte("conf_state"))); err != nil {

@@ -77,7 +77,8 @@ func StartReadyHandler(
 		return nil, err
 	}
 
-	for _, peerid := range state.Peers {
+	for _, peerid := range state.ConfState.Nodes {
+		peerid := PeerID(peerid)
 		if peerid == id {
 			continue
 		}
@@ -308,7 +309,8 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 			return err
 		}
 	case pb.EntryConfChange:
-		if entry.Index < rc.confIndex {
+
+		if entry.Index <= rc.confIndex {
 			break
 		}
 
@@ -325,10 +327,6 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 		if err := rc.executor.OnConfState(entry.Index,
 			*confState); err != nil {
 			return err
-		}
-
-		if entry.Index == rc.confIndex {
-			break
 		}
 
 		switch typ := cc.Type; typ {
@@ -404,6 +402,4 @@ func (rc *readyHandler) getSnapshot(w http.ResponseWriter, r *http.Request) {
 
 func (rc *readyHandler) Describe(w io.Writer) {
 	rc.storage.Describe(w)
-	rc.executor.Describe(w)
-	fmt.Fprintf(w, "conf_index: %d\n", atomic.LoadUint64(&rc.confIndex))
 }

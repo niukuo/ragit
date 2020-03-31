@@ -2,8 +2,6 @@ package raft
 
 import (
 	"context"
-	"fmt"
-	"io"
 	"sync/atomic"
 
 	"github.com/golang/protobuf/proto"
@@ -22,8 +20,6 @@ type Executor interface {
 	OnConfState(index uint64, state pb.ConfState) error
 
 	OnSnapshot(snapsnot pb.Snapshot, srcId PeerID) error
-
-	Describe(w io.Writer)
 }
 
 type executor struct {
@@ -35,10 +31,6 @@ type executor struct {
 	fnCh    chan func()
 
 	leaderTerm uint64
-
-	dataIndex uint64
-
-	appliedIndex uint64
 
 	Runner
 
@@ -63,9 +55,6 @@ func StartExecutor(
 		entryCh: make(chan *pb.Entry, 100),
 		fnCh:    make(chan func()),
 
-		dataIndex:    dataIndex,
-		appliedIndex: dataIndex,
-
 		logger: logging.GetLogger("executor"),
 	}
 
@@ -88,38 +77,22 @@ func (e *executor) OnLeaderStop() {
 }
 
 func (e *executor) OnEntry(entry *pb.Entry) error {
-	if expect := atomic.LoadUint64(&e.dataIndex) + 1; entry.Index != expect {
-		e.logger.Warning("index gap, expect: ", expect,
-			", actual: ", entry.Index)
-		return fmt.Errorf("index gap, expect %d, actual %d",
-			expect, entry.Index)
-	}
-
 	select {
 	case e.entryCh <- entry:
 	case <-e.Runner.Done():
 		return ErrStopped
 	}
 
-	atomic.StoreUint64(&e.dataIndex, entry.Index)
 	return nil
 }
 
 func (e *executor) OnConfState(index uint64, state pb.ConfState) error {
-	if expect := atomic.LoadUint64(&e.dataIndex) + 1; index != expect {
-		e.logger.Warning("index gap, expect: ", expect,
-			", actual: ", index)
-		return fmt.Errorf("index gap, expect %d, actual %d",
-			expect, index)
-	}
-
 	if err := e.withPipeline(func() error {
 		return e.sm.OnConfState(index, state)
 	}); err != nil {
 		return err
 	}
 
-	atomic.StoreUint64(&e.dataIndex, index)
 	return nil
 }
 
@@ -134,17 +107,11 @@ func (e *executor) OnSnapshot(snapshot pb.Snapshot, srcId PeerID) error {
 			<-e.entryCh
 		}
 
-		index := snapshot.Metadata.Index
-		atomic.StoreUint64(&e.dataIndex, index)
-		atomic.StoreUint64(&e.appliedIndex, index)
-
 		return nil
 	})
 }
 
 func (e *executor) Run(stopC <-chan struct{}) error {
-
-	e.logger.Info("executor started. applied_index: ", e.dataIndex)
 
 	for {
 		select {
@@ -157,7 +124,6 @@ func (e *executor) Run(stopC <-chan struct{}) error {
 			if err := e.applyEntry(entry); err != nil {
 				return err
 			}
-			atomic.StoreUint64(&e.appliedIndex, entry.Index)
 		case fn := <-e.fnCh:
 			fn()
 		}
@@ -194,10 +160,4 @@ func (e *executor) withPipeline(fn func() error) error {
 	case <-e.Runner.Done():
 		return ErrStopped
 	}
-}
-
-func (e *executor) Describe(w io.Writer) {
-	appliedIndex := atomic.LoadUint64(&e.appliedIndex)
-	pendingApplyIndex := atomic.LoadUint64(&e.dataIndex)
-	fmt.Fprintf(w, "apply_index: (%d, %d]\n", appliedIndex, pendingApplyIndex)
 }

@@ -48,6 +48,7 @@ type Node interface {
 	getContext(term, index uint64) (*applyResult, bool)
 	applyConfChange(cc pb.ConfChange) (*pb.ConfState, error)
 
+	Handler() http.Handler
 	InitRouter(mux *http.ServeMux)
 	Propose(ctx context.Context, oplog refs.Oplog) error
 	GetStatus(ctx context.Context) (*Status, error)
@@ -99,7 +100,7 @@ func RunNode(c Config) (Node, error) {
 	rc.raftLogger.Info("starting raft instance, applied_index: ", state.AppliedIndex,
 		", committed_index: ", state.HardState.Commit,
 		", conf_index: ", state.ConfIndex,
-		", nodes: ", state.Peers)
+		", conf_state: ", state.ConfState)
 
 	readyHandler, err := StartReadyHandler(
 		c.ClusterID,

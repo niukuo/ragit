@@ -127,7 +127,7 @@ func (s *DBSuite) TestWAL() {
 	s.Equal(uint64(0), state.AppliedIndex)
 	s.Equal(uint64(0), state.ConfIndex)
 	s.True(raft.IsEmptyHardState(state.HardState))
-	s.Len(state.Peers, 0)
+	s.Len(state.ConfState.Nodes, 0)
 
 	var hs pb.HardState
 	hs.Term = 2
