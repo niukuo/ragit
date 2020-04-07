@@ -34,6 +34,8 @@ type storage struct {
 	listener refs.Listener
 	db       *bbolt.DB
 
+	state pb.HardState
+
 	logger logging.Logger
 }
 
@@ -84,6 +86,11 @@ func Open(path string,
 		return nil, err
 	}
 
+	s.state, _, err = s.InitialState()
+	if err != nil {
+		return nil, err
+	}
+
 	return s, nil
 }
 
@@ -122,9 +129,8 @@ func (s *storage) init(tx *bbolt.Tx) error {
 	}
 
 	if err := putUint64(stateb, map[string]uint64{
-		"term":   0,
-		"commit": 0,
-		"vote":   0,
+		"term": 0,
+		"vote": 0,
 	}); err != nil {
 		return err
 	}
@@ -182,22 +188,23 @@ func saveConfState(b *bbolt.Bucket, index uint64, confState pb.ConfState) error 
 func (s *storage) Save(
 	state pb.HardState,
 	entries []pb.Entry,
-	sync bool) error {
+) error {
 
-	if len(entries) > 0 {
-		if err := s.WALStorage.SaveWAL(entries, sync); err != nil {
-			return err
-		}
+	if err := s.WALStorage.SaveWAL(entries); err != nil {
+		return err
 	}
 
-	if !raft.IsEmptyHardState(state) {
+	if raft.IsEmptyHardState(state) {
+		return nil
+	}
+
+	if state.Term != s.state.Term || state.Vote != s.state.Vote {
 		if err := s.db.Update(func(tx *bbolt.Tx) error {
 
 			b := tx.Bucket(BucketState)
 			if err := putUint64(b, map[string]uint64{
-				"term":   state.Term,
-				"vote":   state.Vote,
-				"commit": state.Commit,
+				"term": state.Term,
+				"vote": state.Vote,
 			}); err != nil {
 				return err
 			}
@@ -207,6 +214,8 @@ func (s *storage) Save(
 			return err
 		}
 	}
+
+	s.state = state
 
 	return nil
 }
@@ -299,7 +308,7 @@ func (s *storage) OnSnapshot(
 			Term:  snapshot.Metadata.Term,
 			Data: append([]byte(fmt.Sprintf("snapshot from %s: ", objSrcNode)),
 				snapshot.Data...),
-		}}, true); err != nil {
+		}}); err != nil {
 			return fmt.Errorf("save snapshot wal log, err: %v", err)
 		}
 
@@ -425,9 +434,12 @@ func getInitState(
 ) error {
 
 	getUint64(stateb, map[string]*uint64{
-		"term":   &hardState.Term,
-		"vote":   &hardState.Vote,
-		"commit": &hardState.Commit,
+		"term": &hardState.Term,
+		"vote": &hardState.Vote,
+	})
+
+	getUint64(metab, map[string]*uint64{
+		"index": &hardState.Commit,
 	})
 
 	if err := confState.Unmarshal(
@@ -520,9 +532,8 @@ func (s *storage) Bootstrap(peers []refs.PeerID) error {
 		}
 
 		if err := putUint64(stateb, map[string]uint64{
-			"term":   1,
-			"commit": 1,
-			"vote":   0,
+			"term": 1,
+			"vote": 0,
 		}); err != nil {
 			return err
 		}
@@ -532,7 +543,7 @@ func (s *storage) Bootstrap(peers []refs.PeerID) error {
 			Index: 1,
 			Type:  pb.EntryNormal,
 			Data:  []byte(fmt.Sprintf("bootstrap %v", peers)),
-		}}, true); err != nil {
+		}}); err != nil {
 			return err
 		}
 
@@ -552,8 +563,10 @@ func (s *storage) GetInitState() (*ragit.InitialState, error) {
 		stateb := tx.Bucket(BucketState)
 		metab := tx.Bucket(BucketMeta)
 
+		var hardState pb.HardState
+
 		if err := getInitState(
-			stateb, &state.HardState,
+			stateb, &hardState,
 			metab, &state.ConfState,
 		); err != nil {
 			return err
@@ -644,15 +657,13 @@ func (s *storage) Describe(w io.Writer) {
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		stateb := tx.Bucket(BucketState)
 		{
-			var term, vote, commit uint64
+			var term, vote uint64
 			getUint64(stateb, map[string]*uint64{
-				"term":   &term,
-				"vote":   &vote,
-				"commit": &commit,
+				"term": &term,
+				"vote": &vote,
 			})
 			fmt.Fprintln(w, "term:", term)
 			fmt.Fprintln(w, "vote:", ragit.PeerID(vote))
-			fmt.Fprintln(w, "committed_index:", commit)
 		}
 
 		metab := tx.Bucket(BucketMeta)

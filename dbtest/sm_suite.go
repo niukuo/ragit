@@ -50,8 +50,14 @@ func (s *SMSuite) TestApply() {
 
 	state, err := s.storage.GetInitState()
 	s.NoError(err)
-	s.True(raft.IsEmptyHardState(state.HardState))
+	s.Zero(state.AppliedIndex)
+	s.Zero(state.ConfIndex)
 	s.Len(state.ConfState.Nodes, 0)
+
+	hardState, confState, err := s.storage.InitialState()
+	s.NoError(err)
+	s.True(raft.IsEmptyHardState(hardState))
+	s.Equal(state.ConfState, confState)
 
 	s.checkIndex(0, 0)
 
@@ -110,7 +116,7 @@ func (s *SMSuite) TestApply() {
 		`3132333435363738393061626364656631323335 refs/heads/master
 `, string(snapshot.Data))
 
-	confState := pb.ConfState{
+	confState = pb.ConfState{
 		Nodes: []uint64{111, 222, 333},
 	}
 

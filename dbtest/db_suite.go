@@ -40,7 +40,7 @@ func (s *DBSuite) TestWAL() {
 		{Term: 1, Index: 3},
 		{Term: 1, Index: 4},
 		{Term: 1, Index: 5},
-	}, false))
+	}))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -54,7 +54,7 @@ func (s *DBSuite) TestWAL() {
 		{Term: 1, Index: 6},
 		{Term: 1, Index: 7},
 		{Term: 1, Index: 8},
-	}, false))
+	}))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -66,7 +66,7 @@ func (s *DBSuite) TestWAL() {
 
 	s.NoError(s.db.Save(pb.HardState{}, []pb.Entry{
 		{Term: 1, Index: 7},
-	}, false))
+	}))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -78,7 +78,7 @@ func (s *DBSuite) TestWAL() {
 
 	s.NoError(s.db.Save(pb.HardState{}, []pb.Entry{
 		{Term: 1, Index: 11},
-	}, false))
+	}))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -91,7 +91,7 @@ func (s *DBSuite) TestWAL() {
 	s.Error(s.db.Save(pb.HardState{}, []pb.Entry{
 		{Term: 1, Index: 11},
 		{Term: 1, Index: 13},
-	}, false))
+	}))
 
 	first, err = s.db.FirstIndex()
 	s.NoError(err)
@@ -105,7 +105,7 @@ func (s *DBSuite) TestWAL() {
 		{Term: 1, Index: 111},
 		{Term: 2, Index: 112},
 		{Term: 3, Index: 113},
-	}, false))
+	}))
 
 	ents, err := s.db.Entries(111, 114, 100)
 	s.NoError(err)
@@ -126,13 +126,17 @@ func (s *DBSuite) TestWAL() {
 	s.NoError(err)
 	s.Equal(uint64(0), state.AppliedIndex)
 	s.Equal(uint64(0), state.ConfIndex)
-	s.True(raft.IsEmptyHardState(state.HardState))
 	s.Len(state.ConfState.Nodes, 0)
+
+	hardState, confState, err := s.db.InitialState()
+	s.NoError(err)
+	s.True(raft.IsEmptyHardState(hardState))
+	s.Equal(state.ConfState, confState)
 
 	var hs pb.HardState
 	hs.Term = 2
-	s.NoError(s.db.Save(hs, nil, false))
-	hardState, confState, err := s.db.InitialState()
+	s.NoError(s.db.Save(hs, nil))
+	hardState, confState, err = s.db.InitialState()
 	s.False(raft.IsEmptyHardState(hardState))
 	s.Len(confState.Nodes, 0)
 }

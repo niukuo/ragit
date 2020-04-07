@@ -9,7 +9,7 @@ import (
 type WALStorage interface {
 	Describe(w io.Writer)
 	SetSnapshotIndex(index uint64)
-	SaveWAL(ents []pb.Entry, sync bool) error
+	SaveWAL(ents []pb.Entry) error
 	Close()
 
 	Entries(lo, hi, maxSize uint64) ([]pb.Entry, error)

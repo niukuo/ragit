@@ -8,7 +8,6 @@ import (
 )
 
 type InitialState struct {
-	HardState    pb.HardState
 	AppliedIndex uint64
 
 	ConfState pb.ConfState
@@ -19,7 +18,7 @@ type Storage interface {
 	raft.Storage
 
 	GetInitState() (*InitialState, error)
-	Save(hardState pb.HardState, entries []pb.Entry, sync bool) error
+	Save(hardState pb.HardState, entries []pb.Entry) error
 
 	Describe(w io.Writer)
 }

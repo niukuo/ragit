@@ -109,7 +109,7 @@ func (s *ldbWALStorage) SetSnapshotIndex(index uint64) {
 	atomic.StoreUint64(&s.snapshotIndex, index)
 }
 
-func (s *ldbWALStorage) SaveWAL(ents []pb.Entry, sync bool) error {
+func (s *ldbWALStorage) SaveWAL(ents []pb.Entry) error {
 	if len(ents) == 0 {
 		return nil
 	}
@@ -217,7 +217,7 @@ func (s *ldbWALStorage) SaveWAL(ents []pb.Entry, sync bool) error {
 	s.logger.Info(buf.String())
 
 	wo := &opt.WriteOptions{
-		Sync: sync,
+		Sync: true,
 	}
 
 	if err := s.db.Write(wb, wo); err != nil {

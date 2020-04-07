@@ -118,7 +118,6 @@ func RunNode(c Config) (Node, error) {
 	}
 
 	rc.raftLogger.Info("starting raft instance, applied_index: ", state.AppliedIndex,
-		", committed_index: ", state.HardState.Commit,
 		", conf_index: ", state.ConfIndex,
 		", conf_state: ", state.ConfState)
 
@@ -227,8 +226,9 @@ func readyForLogger(rd *raft.Ready) []interface{} {
 
 func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 	raftState := raft.StateFollower
-	var hardState pb.HardState
 	leader := PeerID(0)
+
+	var hardState pb.HardState
 
 	for {
 		var rd *raft.Ready
@@ -298,10 +298,9 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 
 			atomic.StoreUint64(&rc.confIndex, snap.Metadata.Index)
 		}
-
 		atomic.StoreInt32(&rc.fetchingSnapshot, 0)
 
-		if err := rc.storage.Save(rd.HardState, rd.Entries, rd.MustSync); err != nil {
+		if err := rc.storage.Save(rd.HardState, rd.Entries); err != nil {
 			rc.raftLogger.Warning("persistent failed, err: ", err)
 			return err
 		}
