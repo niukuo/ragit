@@ -86,14 +86,6 @@ func RunNode(c Config) (Node, error) {
 		return nil, err
 	}
 
-	for _, peerid := range state.ConfState.Nodes {
-		peerid := PeerID(peerid)
-		if peerid == id {
-			continue
-		}
-		transport.AddPeer(types.ID(peerid), []string{"http://" + peerid.Addr()})
-	}
-
 	executor, err := StartExecutor(r, sm, state.AppliedIndex)
 	if err != nil {
 		return nil, err
@@ -144,6 +136,14 @@ func RunNode(c Config) (Node, error) {
 
 		return e
 	})
+
+	for _, peerid := range state.ConfState.Nodes {
+		peerid := PeerID(peerid)
+		if peerid == id {
+			continue
+		}
+		transport.AddPeer(types.ID(peerid), []string{"http://" + peerid.Addr()})
+	}
 
 	return rc, nil
 }
