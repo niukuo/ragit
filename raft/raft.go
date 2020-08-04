@@ -95,12 +95,14 @@ func (rc *raftNode) Start(
 ) {
 
 	rc.readyHandler = readyHandler
-
+	startChan := make(chan struct{})
 	rc.Runner = StartRunner(func(stopC <-chan struct{}) error {
+		<-startChan
 		err := rc.serveRaft(stopC, node, d)
 		rc.requests.Clear(ErrStopped)
 		return err
 	})
+	close(startChan)
 }
 
 func (rc *raftNode) getContext(term, index uint64) (*applyResult, error) {
