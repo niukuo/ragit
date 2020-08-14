@@ -9,13 +9,13 @@ import (
 	"io"
 	"sort"
 
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/niukuo/ragit/logging"
 	ragit "github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/bbolt"
 	"go.etcd.io/etcd/raft"
 	pb "go.etcd.io/etcd/raft/raftpb"
-	"gopkg.in/src-d/go-git.v4/plumbing/protocol/packp"
 )
 
 var (

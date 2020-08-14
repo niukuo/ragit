@@ -5,8 +5,8 @@ import (
 	"errors"
 	"io"
 
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/niukuo/ragit/refs"
-	"gopkg.in/src-d/go-git.v4/plumbing/protocol/packp"
 )
 
 type emptyListener struct {
