@@ -96,6 +96,8 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch action := r.URL.Query().Get("action"); action {
 		case "add":
 			typ = raftpb.ConfChangeAddNode
+		case "add_learner":
+			typ = raftpb.ConfChangeAddLearnerNode
 		case "remove":
 			typ = raftpb.ConfChangeRemoveNode
 		default:

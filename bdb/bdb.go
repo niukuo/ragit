@@ -260,10 +260,16 @@ func (s *storage) OnSnapshot(
 		peers = append(peers, ragit.PeerID(peer))
 	}
 
+	learners := make([]ragit.PeerID, 0, len(snapshot.Metadata.ConfState.Learners))
+	for _, learner := range snapshot.Metadata.ConfState.Learners {
+		learners = append(learners, ragit.PeerID(learner))
+	}
+
 	s.logger.Info("saving snapshot from ", objSrcNode,
 		", term: ", snapshot.Metadata.Term,
 		", index: ", snapshot.Metadata.Index,
-		", peers: ", peers)
+		", peers: ", peers,
+		", learners: ", learners)
 
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
 
@@ -654,6 +660,7 @@ func (s *storage) Describe(w io.Writer) {
 	fmt.Fprintln(w, "\nstorage:")
 
 	s.WALStorage.Describe(w)
+
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		stateb := tx.Bucket(BucketState)
 		{
@@ -681,18 +688,24 @@ func (s *storage) Describe(w io.Writer) {
 				return err
 			}
 
-			peers := confState.Nodes
-			fmt.Fprint(w, "peers: [")
-			sort.Slice(peers, func(i, j int) bool {
-				return peers[i] < peers[j]
-			})
-			for i, peer := range peers {
-				if i != 0 {
-					fmt.Fprint(w, " ")
+			describePeers := func(peers []uint64) {
+				fmt.Fprint(w, "[")
+				sort.Slice(peers, func(i, j int) bool {
+					return peers[i] < peers[j]
+				})
+				for i, peer := range peers {
+					if i != 0 {
+						fmt.Fprint(w, " ")
+					}
+					fmt.Fprint(w, ragit.PeerID(peer))
 				}
-				fmt.Fprint(w, ragit.PeerID(peer))
+				fmt.Fprintln(w, "]")
 			}
-			fmt.Fprintln(w, "]")
+
+			fmt.Fprint(w, "nodes: ")
+			describePeers(confState.Nodes)
+			fmt.Fprint(w, "learners: ")
+			describePeers(confState.Learners)
 
 			fmt.Fprintln(w, "snapshot_term:", term)
 			fmt.Fprintln(w, "snapshot_index:", index)

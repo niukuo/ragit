@@ -114,11 +114,18 @@ func (m *Snapshot) String() string {
 	content := make(map[string]interface{})
 	content["Index"] = m.Metadata.Index
 	content["Term"] = m.Metadata.Term
-	peers := make([]PeerID, 0)
+	peers := make([]PeerID, 0, len(m.Metadata.ConfState.Nodes))
 	for _, peer := range m.Metadata.ConfState.Nodes {
 		peers = append(peers, PeerID(peer))
 	}
 	content["peers"] = peers
+	if len(m.Metadata.ConfState.Learners) > 0 {
+		learners := make([]PeerID, 0, len(m.Metadata.ConfState.Learners))
+		for _, learner := range m.Metadata.ConfState.Learners {
+			learners = append(learners, PeerID(learner))
+		}
+		content["learners"] = learners
+	}
 	content["data"] = fmt.Sprintf("(%d bytes)", len(m.Data))
 	return fmt.Sprintf("%v", content)
 }

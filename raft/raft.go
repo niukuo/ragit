@@ -282,6 +282,9 @@ func (rc *raftNode) confChange(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		opType = pb.ConfChangeAddNode
+		if r.URL.Query().Get("mode") == "learner" {
+			opType = pb.ConfChangeAddLearnerNode
+		}
 	case http.MethodDelete:
 		opType = pb.ConfChangeRemoveNode
 	default:
@@ -302,6 +305,7 @@ func (rc *raftNode) confChange(w http.ResponseWriter, r *http.Request) {
 	}
 	rc.confChangeC <- cc
 
+	rc.eventLogger.Infof("confChange, op %s, node %s", opType.String(), nodeID)
 	// As above, optimistic that raft will apply the conf change
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -145,6 +145,14 @@ func RunNode(c Config) (Node, error) {
 		transport.AddPeer(types.ID(peerid), []string{"http://" + peerid.Addr()})
 	}
 
+	for _, learnerID := range state.ConfState.Learners {
+		learnerID := PeerID(learnerID)
+		if learnerID == id {
+			continue
+		}
+		transport.AddPeer(types.ID(learnerID), []string{"http://" + learnerID.Addr()})
+	}
+
 	return rc, nil
 }
 
@@ -296,6 +304,15 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 					[]string{"http://" + peer.Addr()})
 			}
 
+			for _, id := range snap.Metadata.ConfState.Learners {
+				learnerID := PeerID(id)
+				if learnerID == rc.id {
+					continue
+				}
+				rc.transport.AddPeer(types.ID(id),
+					[]string{"http://" + learnerID.Addr()})
+			}
+
 			atomic.StoreUint64(&rc.confIndex, snap.Metadata.Index)
 		}
 		atomic.StoreInt32(&rc.fetchingSnapshot, 0)
@@ -351,7 +368,7 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 		}
 
 		switch typ := cc.Type; typ {
-		case pb.ConfChangeAddNode:
+		case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
 			if cc.NodeID != uint64(rc.id) {
 				rc.transport.AddPeer(types.ID(cc.NodeID),
 					[]string{"http://" + PeerID(cc.NodeID).Addr()})

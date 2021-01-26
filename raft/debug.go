@@ -202,10 +202,15 @@ func (rc *raftNode) Describe(w io.Writer) {
 	})
 
 	for _, rep := range replicators {
-		fmt.Fprintf(w, "replicator@%s: ", rep.id)
-		if rep.typ != raft.ProgressTypePeer {
-			fmt.Fprintf(w, "%v ", rep.typ)
+		switch rep.typ {
+		case raft.ProgressTypePeer:
+			fmt.Fprintf(w, "replicator@%s: ", rep.id)
+		case raft.ProgressTypeLearner:
+			fmt.Fprintf(w, "learner@%s: ", rep.id)
+		default:
+			fmt.Fprintf(w, "%v@%s: ", rep.typ, rep.id)
 		}
+
 		switch state := rep.pr.State; state {
 		case tracker.ProgressStateProbe:
 			state := "probe"

@@ -18,7 +18,7 @@ func (s Status) MarshalJSON() ([]byte, error) {
 		j += "},"
 	} else {
 		for k, v := range s.Progress {
-			subj := fmt.Sprintf(`"%s":{"match":%d,"next":%d,"state":%q},`, PeerID(k), v.Match, v.Next, v.State)
+			subj := fmt.Sprintf(`"%s":{"match":%d,"next":%d,"state":%q,"isLearner":%t},`, PeerID(k), v.Match, v.Next, v.State, v.IsLearner)
 			j += subj
 		}
 		// remove the trailing ","
@@ -48,9 +48,10 @@ func (s Status) MemberStatus() *MemberStatus {
 
 	for k, v := range s.Progress {
 		tracker := Tracker{
-			Match: v.Match,
-			Next:  v.Next,
-			State: v.State.String(),
+			Match:     v.Match,
+			Next:      v.Next,
+			State:     v.State.String(),
+			IsLearner: v.IsLearner,
 		}
 		id := PeerID(k).String()
 		mstatus.Progress[id] = tracker
@@ -60,9 +61,10 @@ func (s Status) MemberStatus() *MemberStatus {
 }
 
 type Tracker struct {
-	Match uint64 `json:"match"`
-	Next  uint64 `json:"next"`
-	State string `json:"state"`
+	Match     uint64 `json:"match"`
+	Next      uint64 `json:"next"`
+	State     string `json:"state"`
+	IsLearner bool   `json:"isLearner"`
 }
 
 type MemberStatus struct {
