@@ -255,8 +255,8 @@ func (s *storage) OnSnapshot(
 		return err
 	}
 
-	peers := make([]ragit.PeerID, 0, len(snapshot.Metadata.ConfState.Nodes))
-	for _, peer := range snapshot.Metadata.ConfState.Nodes {
+	peers := make([]ragit.PeerID, 0, len(snapshot.Metadata.ConfState.Voters))
+	for _, peer := range snapshot.Metadata.ConfState.Voters {
 		peers = append(peers, ragit.PeerID(peer))
 	}
 
@@ -490,7 +490,7 @@ func (s *storage) Bootstrap(peers []refs.PeerID) error {
 
 	var confState pb.ConfState
 	for _, peer := range peers {
-		confState.Nodes = append(confState.Nodes, uint64(peer))
+		confState.Voters = append(confState.Voters, uint64(peer))
 	}
 
 	data, err := confState.Marshal()
@@ -703,7 +703,7 @@ func (s *storage) Describe(w io.Writer) {
 			}
 
 			fmt.Fprint(w, "nodes: ")
-			describePeers(confState.Nodes)
+			describePeers(confState.Voters)
 			fmt.Fprint(w, "learners: ")
 			describePeers(confState.Learners)
 

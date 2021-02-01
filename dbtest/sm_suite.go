@@ -52,7 +52,7 @@ func (s *SMSuite) TestApply() {
 	s.NoError(err)
 	s.Zero(state.AppliedIndex)
 	s.Zero(state.ConfIndex)
-	s.Len(state.ConfState.Nodes, 0)
+	s.Len(state.ConfState.Voters, 0)
 
 	hardState, confState, err := s.storage.InitialState()
 	s.NoError(err)
@@ -117,7 +117,7 @@ func (s *SMSuite) TestApply() {
 `, string(snapshot.Data))
 
 	confState = pb.ConfState{
-		Nodes: []uint64{111, 222, 333},
+		Voters: []uint64{111, 222, 333},
 	}
 
 	s.NoError(s.storage.OnConfState(3, confState))
@@ -125,7 +125,7 @@ func (s *SMSuite) TestApply() {
 
 	_, confState, err = s.storage.InitialState()
 	s.NoError(err)
-	s.Equal([]uint64{111, 222, 333}, confState.Nodes)
+	s.Equal([]uint64{111, 222, 333}, confState.Voters)
 
 	snapshot.Data = []byte(
 		`3132333435363738393061626364656631323335 refs/heads/branch1

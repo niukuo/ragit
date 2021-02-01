@@ -15,7 +15,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/raft"
-	tracker "go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/tracker"
 )
 
 func (rc *readyHandler) getWAL(w http.ResponseWriter, r *http.Request) {
@@ -212,9 +212,9 @@ func (rc *raftNode) Describe(w io.Writer) {
 		}
 
 		switch state := rep.pr.State; state {
-		case tracker.ProgressStateProbe:
+		case tracker.StateProbe:
 			state := "probe"
-			if rep.pr.Paused {
+			if rep.pr.ProbeSent {
 				state = "paused"
 			}
 			if rep.pr.RecentActive {
@@ -222,10 +222,10 @@ func (rc *raftNode) Describe(w io.Writer) {
 			}
 			fmt.Fprintf(w, "%s ", state)
 			fallthrough
-		case tracker.ProgressStateReplicate:
+		case tracker.StateReplicate:
 			fmt.Fprintf(w, "match=%v, next=%v",
 				rep.pr.Match, rep.pr.Next)
-		case tracker.ProgressStateSnapshot:
+		case tracker.StateSnapshot:
 			fmt.Fprintf(w, "snapshot=%v", rep.pr.PendingSnapshot)
 		default:
 			fmt.Fprint(w, state)

@@ -62,7 +62,7 @@ func RunNode(c Config) (Node, error) {
 	c.Config.DisableProposalForwarding = true
 	c.Config.Applied = state.AppliedIndex
 
-	node, err := raft.NewRawNode(&c.Config, nil)
+	node, err := raft.NewRawNode(&c.Config)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func RunNode(c Config) (Node, error) {
 		return e
 	})
 
-	for _, peerid := range state.ConfState.Nodes {
+	for _, peerid := range state.ConfState.Voters {
 		peerid := PeerID(peerid)
 		if peerid == id {
 			continue
@@ -295,7 +295,7 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			}
 
 			rc.transport.RemoveAllPeers()
-			for _, id := range snap.Metadata.ConfState.Nodes {
+			for _, id := range snap.Metadata.ConfState.Voters {
 				peer := PeerID(id)
 				if peer == rc.id {
 					continue
@@ -464,7 +464,7 @@ func (rc *readyHandler) GetStatus(ctx context.Context) (*Status, error) {
 	var status Status
 
 	fn := func(node *raft.RawNode) error {
-		status = Status(*node.Status())
+		status = Status(node.Status())
 		return nil
 	}
 

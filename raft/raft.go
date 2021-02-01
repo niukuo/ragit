@@ -264,7 +264,7 @@ func (rc *raftNode) getMemberStatus(w http.ResponseWriter, r *http.Request) {
 	var memberStatus *MemberStatus
 
 	if err := rc.withPipeline(r.Context(), func(node *raft.RawNode) error {
-		memberStatus = (*Status)(node.Status()).MemberStatus()
+		memberStatus = (Status)(node.Status()).MemberStatus()
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

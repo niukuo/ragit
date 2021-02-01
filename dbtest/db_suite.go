@@ -126,7 +126,7 @@ func (s *DBSuite) TestWAL() {
 	s.NoError(err)
 	s.Equal(uint64(0), state.AppliedIndex)
 	s.Equal(uint64(0), state.ConfIndex)
-	s.Len(state.ConfState.Nodes, 0)
+	s.Len(state.ConfState.Voters, 0)
 
 	hardState, confState, err := s.db.InitialState()
 	s.NoError(err)
@@ -138,5 +138,5 @@ func (s *DBSuite) TestWAL() {
 	s.NoError(s.db.Save(hs, nil))
 	hardState, confState, err = s.db.InitialState()
 	s.False(raft.IsEmptyHardState(hardState))
-	s.Len(confState.Nodes, 0)
+	s.Len(confState.Voters, 0)
 }
