@@ -54,7 +54,7 @@ func main() {
 
 	if hardState, confState, err := storage.InitialState(); err != nil {
 		log.Fatalln(err)
-	} else if etcdraft.IsEmptyHardState(hardState) && confState.Size() == 0 {
+	} else if etcdraft.IsEmptyHardState(hardState) && len(confState.Learners)+len(confState.Voters) == 0 {
 		if err := storage.Bootstrap(peers); err != nil {
 			log.Fatalln("bootstrap failed: ", err)
 		}

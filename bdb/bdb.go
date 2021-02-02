@@ -521,7 +521,7 @@ func (s *storage) Bootstrap(peers []refs.PeerID) error {
 			return fmt.Errorf("already bootstrapped: %+v", hardState)
 		}
 
-		if confState.Size() != 0 {
+		if len(confState.Voters)+len(confState.Learners) > 0 {
 			return errors.New("already has members")
 		}
 
