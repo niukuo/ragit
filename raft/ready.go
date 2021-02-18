@@ -372,11 +372,14 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 			if cc.NodeID != uint64(rc.id) {
 				rc.transport.AddPeer(types.ID(cc.NodeID),
 					[]string{"http://" + PeerID(cc.NodeID).Addr()})
+				rc.raftLogger.Infof("transport.AddPeer of id %s", PeerID(cc.NodeID).String())
 			}
 		case pb.ConfChangeRemoveNode:
-			if cc.NodeID != uint64(rc.id) &&
-				rc.transport.Get(types.ID(cc.NodeID)) != nil {
+			if cc.NodeID == uint64(rc.id) {
+				rc.mayTransferLeader()
+			} else if rc.transport.Get(types.ID(cc.NodeID)) != nil {
 				rc.transport.RemovePeer(types.ID(cc.NodeID))
+				rc.raftLogger.Infof("transport.RemovePeer of id %s", PeerID(cc.NodeID).String())
 			}
 		default:
 			return fmt.Errorf("unsupported conf change type %s", typ)
@@ -388,6 +391,35 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 	}
 
 	return nil
+}
+
+func (rc *readyHandler) mayTransferLeader() {
+	fn := func(node *raft.RawNode) error {
+		status := node.Status()
+		if status.Lead != uint64(rc.id) {
+			return nil
+		}
+		rc.raftLogger.Infof("the leader %s is deleted, need to transfer leader", rc.id.String())
+		var transferee uint64
+		for id, progress := range status.Progress {
+			if id == uint64(rc.id) || progress.IsLearner {
+				continue
+			}
+			if progress.Match == status.Commit {
+				transferee = id
+				break
+			}
+		}
+		if transferee == 0 {
+			rc.raftLogger.Infof("has no match node, not change leader")
+			return nil
+		}
+
+		rc.raftLogger.Infof("to transfer leader to %s", PeerID(transferee).String())
+		node.TransferLeader(transferee)
+		return nil
+	}
+	rc.raft.withPipeline(context.Background(), fn)
 }
 
 func (rc *readyHandler) ReadyC() chan<- <-chan *raft.Ready {
