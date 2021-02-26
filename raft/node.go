@@ -13,4 +13,5 @@ type Node interface {
 	InitRouter(mux *http.ServeMux)
 	Propose(ctx context.Context, oplog refs.Oplog) error
 	GetStatus(ctx context.Context) (*Status, error)
+	ReadIndex(ctx context.Context) (uint64, error)
 }

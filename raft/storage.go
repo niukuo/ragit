@@ -21,4 +21,6 @@ type Storage interface {
 	Save(hardState pb.HardState, entries []pb.Entry) error
 
 	Describe(w io.Writer)
+
+	OnConfIndexChange(confIndex uint64)
 }

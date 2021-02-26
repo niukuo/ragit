@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/niukuo/ragit/logging"
@@ -37,6 +38,8 @@ type storage struct {
 	state pb.HardState
 
 	logger logging.Logger
+
+	applyWaits *waitApplyRequests
 }
 
 type Options struct {
@@ -79,7 +82,8 @@ func Open(path string,
 		listener:   opts.Listener,
 		db:         db,
 
-		logger: opts.Logger,
+		applyWaits: newWaitApplyRequests(100, opts.Logger),
+		logger:     opts.Logger,
 	}
 
 	if err := s.db.Update(s.init); err != nil {
@@ -238,6 +242,19 @@ func (s *storage) OnStart() error {
 		return err
 	}
 
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		metab := tx.Bucket(BucketMeta)
+		var index uint64
+		getUint64(metab, map[string]*uint64{
+			"index": &index,
+		})
+		s.applyWaits.applyDataIndex(index)
+
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -270,6 +287,9 @@ func (s *storage) OnSnapshot(
 		", index: ", snapshot.Metadata.Index,
 		", peers: ", peers,
 		", learners: ", learners)
+
+	s.applyWaits.applyConfIndex(0)
+	s.applyWaits.applyDataIndex(0)
 
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
 
@@ -323,6 +343,9 @@ func (s *storage) OnSnapshot(
 		return err
 	}
 
+	s.applyWaits.applyConfIndex(snapshot.Metadata.Index)
+	s.applyWaits.applyDataIndex(snapshot.Metadata.Index)
+
 	return nil
 
 }
@@ -341,7 +364,26 @@ func (s *storage) OnConfState(index uint64, confState pb.ConfState) error {
 		return err
 	}
 
+	s.applyWaits.applyConfIndex(index)
 	return nil
+}
+
+func (s *storage) GetConfState() (*pb.ConfState, error) {
+	var confState pb.ConfState
+
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		metab := tx.Bucket(BucketMeta)
+
+		if err := confState.Unmarshal(metab.Get([]byte("conf_state"))); err != nil {
+			return err
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return &confState, nil
 }
 
 func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Oplog) error {
@@ -428,6 +470,8 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 	}); err != nil && err != errSkip {
 		return err
 	}
+
+	s.applyWaits.applyDataIndex(index)
 
 	s.WALStorage.SetSnapshotIndex(index)
 
@@ -553,6 +597,7 @@ func (s *storage) Bootstrap(peers []refs.PeerID) error {
 			return err
 		}
 
+		s.applyWaits.applyDataIndex(1)
 		return nil
 	}); err != nil {
 		return err
@@ -734,4 +779,30 @@ func getAllRefs(refsb *bbolt.Bucket, refsMap map[string]refs.Hash) error {
 	}
 
 	return nil
+}
+
+func (s *storage) WaitForApplyIndex(ctx context.Context, appliedIndex uint64) error {
+	req, err := s.applyWaits.addRequest(appliedIndex)
+	if err != nil {
+		return err
+	}
+	if req == nil {
+		return nil
+	}
+
+	defer s.applyWaits.delRequest(req.reqID)
+
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+
+	select {
+	case <-req.resCh:
+		return nil
+	case <-ctxWithTimeout.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *storage) OnConfIndexChange(confIndex uint64) {
+	s.applyWaits.applyConfIndex(confIndex)
 }

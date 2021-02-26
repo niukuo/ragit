@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/etcdserver/api/rafthttp"
 	stats "go.etcd.io/etcd/etcdserver/api/v2stats"
+	"go.etcd.io/etcd/pkg/idutil"
 	"go.etcd.io/etcd/pkg/types"
 	"go.etcd.io/etcd/raft"
 	pb "go.etcd.io/etcd/raft/raftpb"
@@ -40,6 +42,8 @@ type readyHandler struct {
 	readyC           chan (<-chan *raft.Ready)
 	advanceC         chan struct{}
 	fetchingSnapshot int32
+
+	reqIDGen *idutil.Generator
 
 	executor  Executor
 	confIndex uint64
@@ -86,7 +90,7 @@ func RunNode(c Config) (Node, error) {
 		return nil, err
 	}
 
-	executor, err := StartExecutor(r, sm, state.AppliedIndex)
+	executor, err := StartExecutor(r, sm)
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +105,8 @@ func RunNode(c Config) (Node, error) {
 		raft:     r,
 		readyC:   make(chan (<-chan *raft.Ready)),
 		advanceC: make(chan struct{}),
+
+		reqIDGen: idutil.NewGenerator(uint16(c.ID), time.Now()),
 
 		executor:  executor,
 		confIndex: state.ConfIndex,
@@ -218,9 +224,9 @@ func readyForLogger(rd *raft.Ready) []interface{} {
 		logFields = append(logFields, ", Messages: ", len(rd.Messages))
 		for i := range rd.Messages {
 			switch rd.Messages[i].Type {
-			case pb.MsgHeartbeat:
+			case pb.MsgHeartbeat, pb.MsgHeartbeatResp:
 				continue
-			case pb.MsgHeartbeatResp:
+			case pb.MsgReadIndex, pb.MsgReadIndexResp:
 				continue
 			}
 			msgCnt++
@@ -229,6 +235,10 @@ func readyForLogger(rd *raft.Ready) []interface{} {
 	}
 
 	if len(logFields) == 3+msgCnt && len(rd.Messages) > 0 {
+		return nil
+	}
+
+	if len(logFields) == 1 && len(rd.ReadStates) > 0 {
 		return nil
 	}
 
@@ -282,6 +292,10 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			} else if from == raft.StateLeader && to != raft.StateLeader {
 				rc.executor.OnLeaderStop()
 			}
+		}
+
+		if len(rd.ReadStates) != 0 {
+			rc.raft.setReadStates(rd.ReadStates)
 		}
 
 		// save snapshot first. if HardState.Commit is saved and snapshot apply failed,
@@ -352,6 +366,7 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 	case pb.EntryConfChange:
 
 		if entry.Index <= rc.confIndex {
+			rc.storage.OnConfIndexChange(entry.Index)
 			break
 		}
 
@@ -493,6 +508,12 @@ func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog) error {
 	}
 
 	return nil
+}
+
+func (rc *readyHandler) ReadIndex(ctx context.Context) (uint64, error) {
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	return rc.raft.getReadIndex(ctxWithTimeout, rc.reqIDGen.Next())
 }
 
 func (rc *readyHandler) GetStatus(ctx context.Context) (*Status, error) {

@@ -91,7 +91,9 @@ func (m *Message) String() string {
 		content["Commit"] = m.Commit
 	}
 	if cnt := len(m.Entries); cnt > 0 {
-		content[fmt.Sprintf("entries(%d)", cnt)] = Entries(m.Entries)
+		if m.Type != pb.MsgReadIndex && m.Type != pb.MsgReadIndexResp {
+			content[fmt.Sprintf("entries(%d)", cnt)] = Entries(m.Entries)
+		}
 	}
 	if !raft.IsEmptySnap(m.Snapshot) {
 		content["snapshot"] = (*Snapshot)(&m.Snapshot)

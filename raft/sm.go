@@ -17,4 +17,6 @@ type StateMachine interface {
 	OnConfState(index uint64, confState pb.ConfState) error
 
 	OnSnapshot(snapshot pb.Snapshot, srcId PeerID) error
+
+	WaitForApplyIndex(ctx context.Context, index uint64) error
 }

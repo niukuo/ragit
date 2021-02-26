@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,16 +54,21 @@ type Raft interface {
 	withPipeline(ctx context.Context, fn func(node *raft.RawNode) error) error
 
 	Describe(w io.Writer)
+
+	getReadIndex(ctx context.Context, id uint64) (uint64, error)
+	setReadStates([]raft.ReadState)
 }
 
 type raftNode struct {
 	confChangeC chan pb.ConfChange // proposed cluster config changes
 	propC       chan *msgWithResult
 	funcC       chan func(node *raft.RawNode)
+	readIndexC  chan *readRequest
 
 	softState unsafe.Pointer
 
-	requests RequestContextManager
+	requests     RequestContextManager
+	readRequests *readIndexRequests
 
 	readyHandler ReadyHandler
 
@@ -73,16 +79,19 @@ type raftNode struct {
 }
 
 func NewRaft(config *raft.Config) Raft {
-
+	raftLogger := logging.GetLogger("raft")
+	eventLogger := logging.GetLogger("event")
 	rc := &raftNode{
 		confChangeC: make(chan pb.ConfChange),
 		propC:       make(chan *msgWithResult),
 		funcC:       make(chan func(node *raft.RawNode)),
+		readIndexC:  make(chan *readRequest),
 
-		requests: NewRequestContextManager(),
+		requests:     NewRequestContextManager(),
+		readRequests: newReadIndexRequests(100, raftLogger),
 
-		raftLogger:  logging.GetLogger("raft"),
-		eventLogger: logging.GetLogger("event"),
+		raftLogger:  raftLogger,
+		eventLogger: eventLogger,
 	}
 
 	return rc
@@ -175,12 +184,23 @@ func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.
 				msg.Error(err)
 				break
 			}
+		case req := <-rc.readIndexC:
+			if err := func() error {
+				req.term = term
+				ctxToSend := make([]byte, 8)
+				binary.BigEndian.PutUint64(ctxToSend, req.id)
+				node.ReadIndex(ctxToSend)
+				return nil
+			}(); err != nil {
+				rc.raftLogger.Errorf("deal read index %d err, %s", req.id, err.Error())
+			}
 
 		case readyC <- readyCh:
 			rd = node.Ready()
 
 			if !raft.IsEmptyHardState(rd.HardState) {
 				term = rd.HardState.Term
+				rc.readRequests.check(term)
 			}
 
 			if rd.SoftState != nil {
@@ -422,7 +442,7 @@ func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 					", size: ", len(snapshot.Data),
 				)
 			}
-		case pb.MsgHeartbeatResp:
+		case pb.MsgHeartbeatResp, pb.MsgReadIndex, pb.MsgReadIndexResp:
 		default:
 			rc.raftLogger.Info("recv message: ", (*Message)(&m))
 		}
@@ -465,4 +485,36 @@ func (rc *raftNode) applyConfChange(cc pb.ConfChange) (*pb.ConfState, error) {
 		return nil
 	})
 	return state, err
+}
+
+func (rc *raftNode) getReadIndex(ctx context.Context, id uint64) (uint64, error) {
+	req, err := rc.readRequests.addRequest(id)
+	if err != nil {
+		return 0, err
+	}
+	defer rc.readRequests.delRequest(id)
+
+	select {
+	case rc.readIndexC <- req:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-rc.Runner.Done():
+		return 0, ErrStopped
+	}
+
+	select {
+	case res, ok := <-req.resCh:
+		if ok {
+			return res, nil
+		}
+		return 0, errors.New("read index failed, term has changed")
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-rc.Runner.Done():
+		return 0, ErrStopped
+	}
+}
+
+func (rc *raftNode) setReadStates(readStates []raft.ReadState) {
+	rc.readRequests.setReadStates(readStates)
 }

@@ -40,7 +40,6 @@ type executor struct {
 func StartExecutor(
 	raft Raft,
 	sm StateMachine,
-	dataIndex uint64,
 ) (Executor, error) {
 
 	if err := sm.OnStart(); err != nil {
