@@ -49,6 +49,8 @@ func OpenWAL(path string, opts *WALOptions) (LdbWALStorage, error) {
 		return nil, err
 	}
 
+	opts.Logger.Info("leveldb.OpenFile end")
+
 	s := &ldbWALStorage{
 		db: db,
 
@@ -70,8 +72,10 @@ func OpenWAL(path string, opts *WALOptions) (LdbWALStorage, error) {
 }
 
 func (s *ldbWALStorage) fillIndex() error {
+	s.logger.Info("fillIndex begin")
+	defer s.logger.Info("fillIndex end")
 
-	it := s.db.NewIterator(nil, nil)
+	it := s.db.NewIterator(nil, &opt.ReadOptions{DontFillCache: true})
 	defer it.Release()
 
 	if !it.First() {
