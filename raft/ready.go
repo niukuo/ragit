@@ -113,9 +113,9 @@ func RunNode(c Config) (Node, error) {
 		", conf_index: ", state.ConfIndex,
 		", conf_state: ", state.ConfState)
 
-	r.Start(node, rc, c.TickDuration)
-
+	startChan := make(chan struct{})
 	rc.Runner = StartRunner(func(stopC <-chan struct{}) error {
+		<-startChan
 		e := rc.serveReady(stopC)
 		rc.eventLogger.Warning("ready handler stopped, err: ", e)
 
@@ -136,6 +136,9 @@ func RunNode(c Config) (Node, error) {
 
 		return e
 	})
+
+	r.Start(node, rc, c.TickDuration)
+	close(startChan)
 
 	for _, peerid := range state.ConfState.Voters {
 		peerid := PeerID(peerid)
