@@ -68,6 +68,9 @@ func OpenWAL(path string, opts *WALOptions) (LdbWALStorage, error) {
 		return nil, err
 	}
 
+	if err := s.compact(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -101,6 +104,36 @@ func (s *ldbWALStorage) fillIndex() error {
 
 	s.logger.Infof("wal: (%d, %d]", s.firstIndex, s.lastIndex)
 
+	return nil
+}
+
+func (s *ldbWALStorage) compact() error {
+	if s.firstIndex <= 0 {
+		return nil
+	}
+
+	var limit [8]byte
+	binary.BigEndian.PutUint64(limit[:], s.firstIndex)
+	compactRange := util.Range{Limit: limit[:]}
+	sizeGc, err := s.db.SizeOf([]util.Range{compactRange})
+	if err != nil {
+		s.logger.Errorf("get size of wal before %d to compact failed, %s", s.firstIndex, err.Error())
+		return err
+	}
+	s.logger.Infof("wal size to gc before compact, %d", sizeGc.Sum())
+
+	if err := s.db.CompactRange(compactRange); err != nil {
+		s.logger.Errorf("compact data failed, %s", err.Error())
+		return err
+	}
+
+	s.logger.Info("compact data success")
+	sizeGc, err = s.db.SizeOf([]util.Range{compactRange})
+	if err != nil {
+		s.logger.Errorf("get size of wal before %d after compact failed, %s", s.firstIndex, err.Error())
+		return err
+	}
+	s.logger.Infof("wal size to gc after compact, %d", sizeGc.Sum())
 	return nil
 }
 
