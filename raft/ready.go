@@ -498,6 +498,8 @@ func (rc *readyHandler) getSnapshot(w http.ResponseWriter, r *http.Request) {
 
 func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog) error {
 
+	start := time.Now()
+
 	handle, err := rc.raft.Propose(ctx, oplog)
 	if err != nil {
 		return err
@@ -506,6 +508,11 @@ func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog) error {
 	if err := handle.Wait(ctx); err != nil {
 		return err
 	}
+
+	proposeSeconds.Observe(time.Since(start).Seconds())
+	proposeCounter.Inc()
+
+	proposePackBytes.Observe(float64(len(oplog.GetObjPack())))
 
 	return nil
 }

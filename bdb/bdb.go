@@ -288,6 +288,8 @@ func (s *storage) OnSnapshot(
 		", peers: ", peers,
 		", learners: ", learners)
 
+	snapshotReceive.WithLabelValues(objSrcNode.String()).Inc()
+
 	s.applyWaits.applyConfIndex(0)
 	s.applyWaits.applyDataIndex(0)
 
@@ -324,9 +326,14 @@ func (s *storage) OnSnapshot(
 			return err
 		}
 
+		start := time.Now()
+
 		if err := s.listener.FetchObjects(refsMap, objSrcNode); err != nil {
 			return err
 		}
+
+		snapshotFetchObjectsSeconds.WithLabelValues(
+			objSrcNode.String()).Observe(time.Since(start).Seconds())
 
 		if err := s.WALStorage.SaveWAL([]pb.Entry{{
 			Type:  pb.EntryNormal,
@@ -387,6 +394,7 @@ func (s *storage) GetConfState() (*pb.ConfState, error) {
 }
 
 func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Oplog) error {
+	start := time.Now()
 
 	var buf bytes.Buffer
 	var out io.Writer = &buf
@@ -474,6 +482,8 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 	s.applyWaits.applyDataIndex(index)
 
 	s.WALStorage.SetSnapshotIndex(index)
+
+	applyOplogSeconds.Observe(time.Since(start).Seconds())
 
 	return nil
 }
