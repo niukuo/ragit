@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"go.etcd.io/etcd/raft"
 )
@@ -37,14 +38,28 @@ func (s Status) String() string {
 	return string(b)
 }
 
-func (s Status) MemberStatus() *MemberStatus {
+func (s Status) MemberStatus(rh ReadyHandler) (*MemberStatus, error) {
+	idStrs, err := rh.GetMemberAddrs(PeerID(s.ID))
+	if err != nil {
+		return nil, err
+	}
+
+	var leadStrs []string
+	if s.Lead != 0 {
+		leadStrs, err = rh.GetMemberAddrs(PeerID(s.Lead))
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	mstatus := &MemberStatus{
-		ID:        PeerID(s.ID).String(),
-		Lead:      PeerID(s.Lead).String(),
+		ID:        strings.Join(idStrs, ","),
+		Lead:      strings.Join(leadStrs, ","),
 		Commit:    s.Commit,
 		RaftState: s.RaftState.String(),
 	}
 	mstatus.Progress = make(map[string]Tracker, 0)
+	mstatus.Members = make(map[string][]string)
 
 	for k, v := range s.Progress {
 		tracker := Tracker{
@@ -53,11 +68,15 @@ func (s Status) MemberStatus() *MemberStatus {
 			State:     v.State.String(),
 			IsLearner: v.IsLearner,
 		}
-		id := PeerID(k).String()
-		mstatus.Progress[id] = tracker
+		addrs, err := rh.GetMemberAddrs(PeerID(k))
+		if err != nil {
+			return nil, err
+		}
+		mstatus.Progress[strings.Join(addrs, ",")] = tracker
+		mstatus.Members[PeerID(k).String()] = addrs
 	}
 
-	return mstatus
+	return mstatus, nil
 }
 
 type Tracker struct {
@@ -68,11 +87,12 @@ type Tracker struct {
 }
 
 type MemberStatus struct {
-	ID        string             `json:"id"`
-	Lead      string             `json:"lead"`
-	Commit    uint64             `json:"commit"`
-	RaftState string             `json:"raftState"`
-	Progress  map[string]Tracker `json:"progress"`
+	ID        string              `json:"id"`
+	Lead      string              `json:"lead"`
+	Commit    uint64              `json:"commit"`
+	RaftState string              `json:"raftState"`
+	Progress  map[string]Tracker  `json:"progress"`
+	Members   map[string][]string `json:"members"`
 }
 
 func (s MemberStatus) String() string {

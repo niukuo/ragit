@@ -124,7 +124,12 @@ func (rc *readyHandler) getLeaderStat(w http.ResponseWriter, r *http.Request) {
 		convStr := str
 		id, err := strconv.ParseUint(str, 16, 64)
 		if err == nil {
-			convStr = refs.PeerID(id).String()
+			convStrs, err := rc.storage.GetMemberAddrs(refs.PeerID(id))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			convStr = strings.Join(convStrs, ",")
 		}
 		follower["id"] = json.RawMessage(strconv.Quote(convStr))
 		newFollowers = append(newFollowers, follower)

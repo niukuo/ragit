@@ -17,7 +17,7 @@ type Executor interface {
 	OnLeaderStop()
 
 	OnEntry(entry *pb.Entry) error
-	OnConfState(index uint64, state pb.ConfState) error
+	OnConfState(index uint64, state pb.ConfState, member []*refs.Member, opType pb.ConfChangeType) error
 
 	OnSnapshot(snapsnot pb.Snapshot, srcId PeerID) error
 }
@@ -85,9 +85,9 @@ func (e *executor) OnEntry(entry *pb.Entry) error {
 	return nil
 }
 
-func (e *executor) OnConfState(index uint64, state pb.ConfState) error {
+func (e *executor) OnConfState(index uint64, state pb.ConfState, members []*refs.Member, opType pb.ConfChangeType) error {
 	if err := e.withPipeline(func() error {
-		return e.sm.OnConfState(index, state)
+		return e.sm.OnConfState(index, state, members, opType)
 	}); err != nil {
 		return err
 	}

@@ -16,11 +16,14 @@ package api
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/raft"
@@ -92,6 +95,21 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, string(snap.Data))
 
 	case http.MethodPost:
+		ccVal, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("Failed to read on POST (%v)\n", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var ccParams raft.ConfChangeParams
+		err = json.Unmarshal(ccVal, &ccParams)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		now := time.Now()
+		memberID := refs.ComputePeerID(ccParams.PeerUrls, &now)
+
 		var typ raftpb.ConfChangeType
 		switch action := r.URL.Query().Get("action"); action {
 		case "add":
@@ -100,28 +118,33 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			typ = raftpb.ConfChangeAddLearnerNode
 		case "remove":
 			typ = raftpb.ConfChangeRemoveNode
+			id := strings.TrimPrefix(r.URL.Path, "/raft/members/")
+			val, err := strconv.ParseUint(id, 16, 64)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			memberID = refs.PeerID(val)
 		default:
 			http.Error(w, "invalid action: "+action, http.StatusBadRequest)
-			return
-		}
-		body, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("Failed to read on POST (%v)\n", err)
-			http.Error(w, "Failed on POST: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		nodeID, err := raft.ParsePeerID(strings.TrimSpace(string(body)))
-		if err != nil {
-			log.Println("Failed to convert ID for conf change: ", err)
-			http.Error(w, "Failed to parse id: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
 		cc := raftpb.ConfChange{
 			Type:   typ,
-			NodeID: uint64(nodeID),
+			NodeID: uint64(memberID),
 		}
+
+		if typ != raftpb.ConfChangeRemoveNode {
+			member := refs.NewMember(memberID, ccParams.PeerUrls)
+			mb, err := json.Marshal(member)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			cc.Context = mb
+		}
+
 		h.confChangeC <- cc
 
 		// As above, optimistic that raft will apply the conf change

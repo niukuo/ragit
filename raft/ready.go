@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -29,6 +30,7 @@ type ReadyHandler interface {
 	IsFetchingSnapshot() bool
 	SetFetchingSnapshot()
 	GetLastIndex() (uint64, error)
+	GetMemberAddrs(memberID refs.PeerID) ([]string, error)
 }
 
 type readyHandler struct {
@@ -71,14 +73,22 @@ func RunNode(c Config) (Node, error) {
 		return nil, err
 	}
 
-	r := NewRaft(&c.Config)
+	if c.NewMemberID == nil {
+		return nil, fmt.Errorf("NewMemberID is nil")
+	}
+
+	if c.LocalAddrs == nil || len(c.LocalAddrs) == 0 {
+		return nil, fmt.Errorf("LocalAddrs is empty")
+	}
+
+	r := NewRaft(c)
 
 	sm := c.StateMachine
 
 	transport := &rafthttp.Transport{
 		Logger:      zap.NewNop(),
 		ID:          types.ID(id),
-		URLs:        types.MustNewURLs([]string{"http://" + id.Addr()}),
+		URLs:        types.MustNewURLs(c.LocalAddrs),
 		ClusterID:   c.ClusterID,
 		Raft:        r,
 		ServerStats: stats.NewServerStats(id.String(), id.String()),
@@ -151,7 +161,11 @@ func RunNode(c Config) (Node, error) {
 		if peerid == id {
 			continue
 		}
-		transport.AddPeer(types.ID(peerid), []string{"http://" + peerid.Addr()})
+		peerAddrs, err := c.Storage.GetMemberAddrs(peerid)
+		if err != nil {
+			return nil, err
+		}
+		transport.AddPeer(types.ID(peerid), peerAddrs)
 	}
 
 	for _, learnerID := range state.ConfState.Learners {
@@ -159,7 +173,11 @@ func RunNode(c Config) (Node, error) {
 		if learnerID == id {
 			continue
 		}
-		transport.AddPeer(types.ID(learnerID), []string{"http://" + learnerID.Addr()})
+		learnerAddrs, err := c.Storage.GetMemberAddrs(learnerID)
+		if err != nil {
+			return nil, err
+		}
+		transport.AddPeer(types.ID(learnerID), learnerAddrs)
 	}
 
 	return rc, nil
@@ -306,6 +324,7 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			if objSrcName == rc.id {
 				objSrcName = 0
 			}
+
 			if err := rc.executor.OnSnapshot(rd.Snapshot, objSrcName); err != nil {
 				rc.raftLogger.Warning("apply snapshot failed, err: ", err)
 				return err
@@ -317,8 +336,11 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 				if peer == rc.id {
 					continue
 				}
-				rc.transport.AddPeer(types.ID(id),
-					[]string{"http://" + peer.Addr()})
+				peerAddrs, err := rc.storage.GetMemberAddrs(peer)
+				if err != nil {
+					return err
+				}
+				rc.transport.AddPeer(types.ID(id), peerAddrs)
 			}
 
 			for _, id := range snap.Metadata.ConfState.Learners {
@@ -326,8 +348,11 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 				if learnerID == rc.id {
 					continue
 				}
-				rc.transport.AddPeer(types.ID(id),
-					[]string{"http://" + learnerID.Addr()})
+				learnerAddrs, err := rc.storage.GetMemberAddrs(learnerID)
+				if err != nil {
+					return err
+				}
+				rc.transport.AddPeer(types.ID(id), learnerAddrs)
 			}
 
 			atomic.StoreUint64(&rc.confIndex, snap.Metadata.Index)
@@ -380,24 +405,31 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 			return err
 		}
 
+		var m refs.Member
+		err = json.Unmarshal(cc.Context, &m)
+		if err != nil {
+			return err
+		}
+		members := []*refs.Member{
+			&m,
+		}
 		if err := rc.executor.OnConfState(entry.Index,
-			*confState); err != nil {
+			*confState, members, cc.Type); err != nil {
 			return err
 		}
 
 		switch typ := cc.Type; typ {
 		case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
 			if cc.NodeID != uint64(rc.id) {
-				rc.transport.AddPeer(types.ID(cc.NodeID),
-					[]string{"http://" + PeerID(cc.NodeID).Addr()})
-				rc.raftLogger.Infof("transport.AddPeer of id %s", PeerID(cc.NodeID).String())
+				rc.transport.AddPeer(types.ID(cc.NodeID), m.PeerAddrs)
+				rc.raftLogger.Infof("transport.AddPeer of id %v", m.PeerAddrs)
 			}
 		case pb.ConfChangeRemoveNode:
 			if cc.NodeID == uint64(rc.id) {
 				rc.mayTransferLeader()
 			} else if rc.transport.Get(types.ID(cc.NodeID)) != nil {
 				rc.transport.RemovePeer(types.ID(cc.NodeID))
-				rc.raftLogger.Infof("transport.RemovePeer of id %s", PeerID(cc.NodeID).String())
+				rc.raftLogger.Infof("transport.RemovePeer of id %s", cc.NodeID)
 			}
 		default:
 			return fmt.Errorf("unsupported conf change type %s", typ)
@@ -417,7 +449,7 @@ func (rc *readyHandler) mayTransferLeader() {
 		if status.Lead != uint64(rc.id) {
 			return nil
 		}
-		rc.raftLogger.Infof("the leader %s is deleted, need to transfer leader", rc.id.String())
+		rc.raftLogger.Infof("the leader %s is deleted, need to transfer leader", rc.id)
 		var transferee uint64
 		for id, progress := range status.Progress {
 			if id == uint64(rc.id) || progress.IsLearner {
@@ -433,7 +465,7 @@ func (rc *readyHandler) mayTransferLeader() {
 			return nil
 		}
 
-		rc.raftLogger.Infof("to transfer leader to %s", PeerID(transferee).String())
+		rc.raftLogger.Infof("to transfer leader to %s", transferee)
 		node.TransferLeader(transferee)
 		return nil
 	}
@@ -458,6 +490,10 @@ func (rc *readyHandler) SetFetchingSnapshot() {
 
 func (rc *readyHandler) GetLastIndex() (uint64, error) {
 	return rc.storage.LastIndex()
+}
+
+func (rc *readyHandler) GetMemberAddrs(memberID refs.PeerID) ([]string, error) {
+	return rc.storage.GetMemberAddrs(memberID)
 }
 
 func (rc *readyHandler) Handler() http.Handler {

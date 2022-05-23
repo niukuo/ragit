@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -72,13 +72,19 @@ type raftNode struct {
 
 	readyHandler ReadyHandler
 
+	newMemberID func(addr []string) refs.PeerID
+
 	Runner
 
 	raftLogger  logging.Logger
 	eventLogger logging.Logger
 }
 
-func NewRaft(config *raft.Config) Raft {
+type ConfChangeParams struct {
+	PeerUrls []string `json:"peerUrls"`
+}
+
+func NewRaft(config Config) Raft {
 	raftLogger := logging.GetLogger("raft")
 	eventLogger := logging.GetLogger("event")
 	rc := &raftNode{
@@ -89,6 +95,8 @@ func NewRaft(config *raft.Config) Raft {
 
 		requests:     NewRequestContextManager(),
 		readRequests: newReadIndexRequests(100, raftLogger),
+
+		newMemberID: config.NewMemberID,
 
 		raftLogger:  raftLogger,
 		eventLogger: eventLogger,
@@ -154,7 +162,6 @@ func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.
 			if err := node.ProposeConfChange(cc); err == nil {
 				nextIndex++
 			}
-
 		case msg := <-rc.propC:
 
 			if err := func() error {
@@ -280,11 +287,14 @@ func (rc *raftNode) withPipeline(ctx context.Context, fn func(node *raft.RawNode
 }
 
 func (rc *raftNode) getMemberStatus(w http.ResponseWriter, r *http.Request) {
-
 	var memberStatus *MemberStatus
 
 	if err := rc.withPipeline(r.Context(), func(node *raft.RawNode) error {
-		memberStatus = (Status)(node.Status()).MemberStatus()
+		var errStatus error
+		memberStatus, errStatus = (Status)(node.Status()).MemberStatus(rc.readyHandler)
+		if errStatus != nil {
+			return errStatus
+		}
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -299,33 +309,62 @@ func (rc *raftNode) getMemberStatus(w http.ResponseWriter, r *http.Request) {
 
 func (rc *raftNode) confChange(w http.ResponseWriter, r *http.Request) {
 	var opType pb.ConfChangeType
+	var memberID refs.PeerID
+	var peerUrls []string
+
 	switch r.Method {
 	case http.MethodPost:
 		opType = pb.ConfChangeAddNode
 		if r.URL.Query().Get("mode") == "learner" {
 			opType = pb.ConfChangeAddLearnerNode
 		}
+
+		var ccParams ConfChangeParams
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		err := dec.Decode(&ccParams)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(ccParams.PeerUrls) == 0 {
+			http.Error(w, "peer urls is empty", http.StatusBadRequest)
+			return
+		}
+		memberID = rc.newMemberID(ccParams.PeerUrls)
+		peerUrls = ccParams.PeerUrls
 	case http.MethodDelete:
 		opType = pb.ConfChangeRemoveNode
+		id := strings.TrimPrefix(r.URL.Path, "/raft/members/")
+		val, err := strconv.ParseUint(id, 16, 64)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		memberID = refs.PeerID(val)
 	default:
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	id := strings.TrimPrefix(r.URL.Path, "/raft/members/")
-	nodeID, err := ParsePeerID(id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
 	cc := pb.ConfChange{
 		Type:   opType,
-		NodeID: uint64(nodeID),
+		NodeID: uint64(memberID),
 	}
+
+	if opType != pb.ConfChangeRemoveNode {
+		member := refs.NewMember(memberID, peerUrls)
+		mb, err := json.Marshal(member)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		cc.Context = mb
+	}
+
 	rc.confChangeC <- cc
 
-	rc.eventLogger.Infof("confChange, op %s, node %s", opType.String(), nodeID)
+	rc.eventLogger.Infof("confChange, op %s, node %s, addrs %+v", opType.String(), memberID, peerUrls)
 	// As above, optimistic that raft will apply the conf change
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -382,66 +421,10 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog) (AsyncHandle,
 	return &handle, nil
 }
 
-func getSnapshot(src PeerID) (*pb.Snapshot, error) {
-	resp, err := http.Get(fmt.Sprintf("http://%s/raft/snapshot", src.Addr()))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	data, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("http status code = %d, data = %s",
-			resp.StatusCode, string(data))
-	}
-
-	var snapshot pb.Snapshot
-	if err := snapshot.Unmarshal(data); err != nil {
-		return nil, err
-	}
-
-	return &snapshot, nil
-}
-
 func (rc *raftNode) Process(ctx context.Context, m pb.Message) error {
 	return rc.withPipeline(ctx, func(node *raft.RawNode) error {
 		switch m.Type {
 		case pb.MsgHeartbeat:
-			if lastWAL, err := rc.readyHandler.GetLastIndex(); err != nil {
-				return err
-			} else if m.Commit > lastWAL {
-				if rc.readyHandler.IsFetchingSnapshot() {
-					m.Commit = 0
-					break
-				}
-				snapshot, err := getSnapshot(PeerID(m.From))
-				if err != nil {
-					rc.raftLogger.Warning(
-						"maybe my log was lost, commit:", m.Commit,
-						", from: ", PeerID(m.From),
-						", get snapshot failed, err: ", err)
-					m.Commit = 0
-					break
-				}
-				rc.readyHandler.SetFetchingSnapshot()
-				m = pb.Message{
-					From:     m.From,
-					To:       m.To,
-					Term:     m.Term,
-					Type:     pb.MsgSnap,
-					Snapshot: *snapshot,
-				}
-				rc.raftLogger.Warning(
-					"maybe my log was lost, got snapshot, from: ", PeerID(m.From),
-					", term: ", snapshot.Metadata.Term,
-					", index: ", snapshot.Metadata.Index,
-					", size: ", len(snapshot.Data),
-				)
-			}
 		case pb.MsgHeartbeatResp, pb.MsgReadIndex, pb.MsgReadIndexResp:
 		default:
 			rc.raftLogger.Info("recv message: ", (*Message)(&m))

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +21,10 @@ import (
 )
 
 var (
-	BucketState = []byte("state")
-	BucketMeta  = []byte("meta")
-	BucketRefs  = []byte("refs")
+	BucketState   = []byte("state")
+	BucketMeta    = []byte("meta")
+	BucketRefs    = []byte("refs")
+	BucketMembers = []byte("members")
 )
 
 var (
@@ -57,8 +59,15 @@ func NewOptions() *Options {
 	return o
 }
 
+type memberInDB struct {
+	PeerAddrs []string
+}
+
+type GetLocalID func() (refs.PeerID, error)
+
 func Open(path string,
 	opts *Options,
+	getLocalID GetLocalID,
 ) (Storage, error) {
 
 	walOpts := opts.WALOptions
@@ -86,7 +95,8 @@ func Open(path string,
 		logger:     opts.Logger,
 	}
 
-	if err := s.db.Update(s.init); err != nil {
+	err = s.initBuckets(getLocalID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -98,52 +108,124 @@ func Open(path string,
 	return s, nil
 }
 
-func (s *storage) init(tx *bbolt.Tx) error {
-
-	metab, err := tx.CreateBucket(BucketMeta)
-	if err != nil {
-		if err != bbolt.ErrBucketExists {
-			return err
-		}
-		// already inited
-		metab = tx.Bucket(BucketMeta)
-		if v := metab.Get([]byte("conf_index")); v == nil {
-			idx := binary.BigEndian.Uint64(metab.Get([]byte("index")))
-			s.logger.Warning("filling conf_index to ", idx)
-			if err := putUint64(metab, map[string]uint64{
-				"conf_index": idx,
-			}); err != nil {
+func (s *storage) initBuckets(getLocalID GetLocalID) error {
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		metab, err := tx.CreateBucket(BucketMeta)
+		if err != nil {
+			if err != bbolt.ErrBucketExists {
 				return err
 			}
+			// already inited
+			metab = tx.Bucket(BucketMeta)
+			if v := metab.Get([]byte("conf_index")); v == nil {
+				idx := binary.BigEndian.Uint64(metab.Get([]byte("index")))
+				s.logger.Warning("filling conf_index to ", idx)
+				if err := putUint64(metab, map[string]uint64{
+					"conf_index": idx,
+				}); err != nil {
+					return err
+				}
+			}
+
+			stateb := tx.Bucket(BucketState)
+			myID := stateb.Get([]byte("local_id"))
+			if myID != nil {
+				return nil
+			}
+
+			localID, err := getLocalID()
+			if err != nil {
+				return err
+			}
+			err = putUint64(stateb, map[string]uint64{
+				"local_id": uint64(localID),
+			})
+			if err != nil {
+				return err
+			}
+
+			if err := convertToMembers(s, tx); err != nil {
+				return err
+			}
+
+			return nil
 		}
+
+		stateb, err := tx.CreateBucket(BucketState)
+		if err != nil {
+			return err
+		}
+
+		if err := putUint64(metab, map[string]uint64{
+			"term":       0,
+			"index":      0,
+			"conf_index": 0,
+		}); err != nil {
+			return err
+		}
+
+		localID, err := getLocalID()
+		if err != nil {
+			return err
+		}
+		if err := putUint64(stateb, map[string]uint64{
+			"term":     0,
+			"vote":     0,
+			"local_id": uint64(localID),
+		}); err != nil {
+			return err
+		}
+
+		if _, err := tx.CreateBucket(BucketRefs); err != nil {
+			return err
+		}
+
+		if _, err := tx.CreateBucket(BucketMembers); err != nil {
+			return err
+		}
+
 		return nil
-	}
-
-	stateb, err := tx.CreateBucket(BucketState)
-	if err != nil {
-		return err
-	}
-
-	if err := putUint64(metab, map[string]uint64{
-		"term":       0,
-		"index":      0,
-		"conf_index": 0,
 	}); err != nil {
-		return err
-	}
-
-	if err := putUint64(stateb, map[string]uint64{
-		"term": 0,
-		"vote": 0,
-	}); err != nil {
-		return err
-	}
-
-	if _, err := tx.CreateBucket(BucketRefs); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func convertToMembers(s *storage, tx *bbolt.Tx) error {
+	members, err := getMembersByConfState(tx)
+	if err != nil {
+		return err
+	}
+
+	membersb, err := tx.CreateBucket(BucketMembers)
+	if err != nil {
+		return err
+	}
+
+	if err := saveMembers(s, membersb, members, pb.ConfChangeAddNode); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func getMembersByConfState(tx *bbolt.Tx) ([]*refs.Member, error) {
+	metab := tx.Bucket(BucketMeta)
+	var confState pb.ConfState
+	if err := confState.Unmarshal(metab.Get([]byte("conf_state"))); err != nil {
+		return nil, err
+	}
+
+	confMembers := append(confState.Voters, confState.Learners...)
+	members := make([]*refs.Member, len(confMembers))
+	for idx, cMemberID := range confMembers {
+		id := refs.PeerID(cMemberID)
+		m := refs.NewMember(refs.PeerID(cMemberID), []string{fmt.Sprintf("http://%v:%v", uint32(id>>32), uint16(id))})
+		members[idx] = m
+	}
+
+	return members, nil
 }
 
 func (s *storage) Close() {
@@ -151,6 +233,27 @@ func (s *storage) Close() {
 	s.db = nil
 	s.WALStorage.Close()
 	s.WALStorage = nil
+}
+
+func getAllMembers(membersb *bbolt.Bucket) ([]*refs.Member, error) {
+	members := make([]*refs.Member, 0)
+	if err := membersb.ForEach(func(k, v []byte) error {
+		mID := refs.PeerID(binary.BigEndian.Uint64(k))
+		var mInDB memberInDB
+		err := json.Unmarshal(v, &mInDB)
+		if err != nil {
+			return err
+		}
+		members = append(members, &refs.Member{
+			ID:        mID,
+			PeerAddrs: mInDB.PeerAddrs,
+		})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return members, nil
 }
 
 func getUint64(b *bbolt.Bucket, out map[string]*uint64) {
@@ -224,6 +327,64 @@ func (s *storage) Save(
 	return nil
 }
 
+func (s *storage) GetMemberAddrs(memberID refs.PeerID) ([]string, error) {
+	var addrs []string
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		membersb := tx.Bucket(BucketMembers)
+
+		var key [8]byte
+		binary.BigEndian.PutUint64(key[:], uint64(memberID))
+		val := membersb.Get(key[:])
+		if val == nil {
+			return fmt.Errorf("member not exist, memberID=%v", uint64(memberID))
+		}
+
+		var mInDB memberInDB
+		if err := json.Unmarshal(val, &mInDB); err != nil {
+			return fmt.Errorf("unmarshal failed, val=%v", string(val))
+		}
+
+		addrs = mInDB.PeerAddrs
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return addrs, nil
+}
+
+func saveMembers(s *storage, membersb *bbolt.Bucket, members []*refs.Member, confType pb.ConfChangeType) error {
+	switch confType {
+	case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
+		for _, m := range members {
+			var key [8]byte
+			binary.BigEndian.PutUint64(key[:], uint64(m.ID))
+			mInDB := memberInDB{PeerAddrs: m.PeerAddrs}
+			val, err := json.Marshal(mInDB)
+			if err != nil {
+				return err
+			}
+			if err := membersb.Put(key[:], val); err != nil {
+				return err
+			}
+
+		}
+	case pb.ConfChangeRemoveNode:
+		for _, m := range members {
+			var key [8]byte
+			binary.BigEndian.PutUint64(key[:], uint64(m.ID))
+			if err := membersb.Delete(key[:]); err != nil {
+				return err
+			}
+
+		}
+	default:
+		return fmt.Errorf("unsupported conf type=%v", confType)
+	}
+
+	return nil
+}
+
 func (s *storage) OnStart() error {
 
 	refsMap := make(map[string]refs.Hash)
@@ -267,8 +428,12 @@ func (s *storage) OnSnapshot(
 		return errors.New("objSrcNode should not be zero when saving snapshot")
 	}
 
-	refsMap, err := refs.DecodeSnapshot(snapshot.Data)
+	snapshotData, err := refs.DecodeSnapshot(snapshot.Data)
 	if err != nil {
+		return err
+	}
+
+	if err := checkMembers(snapshotData.Members, snapshot.Metadata.ConfState); err != nil {
 		return err
 	}
 
@@ -286,7 +451,9 @@ func (s *storage) OnSnapshot(
 		", term: ", snapshot.Metadata.Term,
 		", index: ", snapshot.Metadata.Index,
 		", peers: ", peers,
-		", learners: ", learners)
+		", learners: ", learners,
+		", members:", snapshotData.Members,
+		",")
 
 	snapshotReceive.WithLabelValues(objSrcNode.String()).Inc()
 
@@ -305,7 +472,7 @@ func (s *storage) OnSnapshot(
 			return err
 		}
 
-		for name, hash := range refsMap {
+		for name, hash := range snapshotData.Refs {
 			hash := hash
 			if err := refsb.Put([]byte(name), hash[:]); err != nil {
 				return err
@@ -326,9 +493,22 @@ func (s *storage) OnSnapshot(
 			return err
 		}
 
+		members := make([]*refs.Member, len(snapshotData.Members))
+		var ObjSrcAddrs []string
+		for idx, m := range snapshotData.Members {
+			members[idx] = m
+			if m.ID == objSrcNode {
+				ObjSrcAddrs = m.PeerAddrs
+			}
+		}
+		membersb := tx.Bucket(BucketMembers)
+		if err := saveMembers(s, membersb, members, pb.ConfChangeAddNode); err != nil {
+			return err
+		}
+
 		start := time.Now()
 
-		if err := s.listener.FetchObjects(refsMap, objSrcNode); err != nil {
+		if err := s.listener.FetchObjects(snapshotData.Refs, ObjSrcAddrs); err != nil {
 			return err
 		}
 
@@ -357,12 +537,27 @@ func (s *storage) OnSnapshot(
 
 }
 
-func (s *storage) OnConfState(index uint64, confState pb.ConfState) error {
+func (s *storage) OnConfState(index uint64, confState pb.ConfState, changeMembers []*refs.Member, opType pb.ConfChangeType) error {
 
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
 
 		metab := tx.Bucket(BucketMeta)
 		if err := saveConfState(metab, index, confState); err != nil {
+			return err
+		}
+
+		membersb := tx.Bucket(BucketMembers)
+		err := saveMembers(s, membersb, changeMembers, opType)
+		if err != nil {
+			return err
+		}
+
+		existMembers, err := getAllMembers(membersb)
+		if err != nil {
+			return err
+		}
+
+		if err := checkMembers(existMembers, confState); err != nil {
 			return err
 		}
 
@@ -372,6 +567,28 @@ func (s *storage) OnConfState(index uint64, confState pb.ConfState) error {
 	}
 
 	s.applyWaits.applyConfIndex(index)
+	return nil
+}
+
+func checkMembers(existMembers []*refs.Member, confState pb.ConfState) error {
+	if len(confState.Learners)+len(confState.Voters) != len(existMembers) {
+		return fmt.Errorf("len not equal, confState=%+v, existMembers=%v", confState, existMembers)
+	}
+
+	confMembers := append(confState.Voters, confState.Learners...)
+	for _, voter := range confMembers {
+		voterID := refs.PeerID(voter)
+		ok := false
+		for _, m := range existMembers {
+			if m.ID == voterID {
+				ok = true
+			}
+		}
+		if !ok {
+			return fmt.Errorf("member Inconsistent,confState=%v, existMembers=%+v", confState, existMembers)
+		}
+	}
+
 	return nil
 }
 
@@ -536,15 +753,15 @@ func (s *storage) InitialState() (pb.HardState, pb.ConfState, error) {
 	return hardState, confState, nil
 }
 
-func (s *storage) Bootstrap(peers []refs.PeerID) error {
-	if len(peers) == 0 {
+func (s *storage) Bootstrap(members []*refs.Member) error {
+	if len(members) == 0 {
 		return errors.New("cant bootstrap with empty peers")
 	}
-	s.logger.Info("bootstraping using ", peers)
+	s.logger.Info("bootstraping using ", members)
 
 	var confState pb.ConfState
-	for _, peer := range peers {
-		confState.Voters = append(confState.Voters, uint64(peer))
+	for _, member := range members {
+		confState.Voters = append(confState.Voters, uint64(member.ID))
 	}
 
 	data, err := confState.Marshal()
@@ -598,11 +815,16 @@ func (s *storage) Bootstrap(peers []refs.PeerID) error {
 			return err
 		}
 
+		membersb := tx.Bucket(BucketMembers)
+		if err := saveMembers(s, membersb, members, pb.ConfChangeAddNode); err != nil {
+			return err
+		}
+
 		if err := s.SaveWAL([]pb.Entry{{
 			Term:  1,
 			Index: 1,
 			Type:  pb.EntryNormal,
-			Data:  []byte(fmt.Sprintf("bootstrap %v", peers)),
+			Data:  []byte(fmt.Sprintf("bootstrap %+v", members)),
 		}}); err != nil {
 			return err
 		}
@@ -617,12 +839,12 @@ func (s *storage) Bootstrap(peers []refs.PeerID) error {
 }
 
 func (s *storage) GetInitState() (*ragit.InitialState, error) {
-
 	var state ragit.InitialState
 
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		stateb := tx.Bucket(BucketState)
 		metab := tx.Bucket(BucketMeta)
+		membersb := tx.Bucket(BucketMembers)
 
 		var hardState pb.HardState
 
@@ -637,6 +859,16 @@ func (s *storage) GetInitState() (*ragit.InitialState, error) {
 			"conf_index": &state.ConfIndex,
 			"index":      &state.AppliedIndex,
 		})
+
+		getUint64(stateb, map[string]*uint64{
+			"local_id": &state.LocalID,
+		})
+
+		var err error
+		state.Members, err = getAllMembers(membersb)
+		if err != nil {
+			return err
+		}
 
 		return nil
 	}); err != nil {
@@ -664,7 +896,23 @@ func (s *storage) Snapshot() (pb.Snapshot, error) {
 		if err := getAllRefs(refsb, refsMap); err != nil {
 			return err
 		}
-		snapshot.Data = refs.EncodeSnapshot(refsMap)
+
+		membersb := tx.Bucket(BucketMembers)
+		members, err := getAllMembers(membersb)
+		if err != nil {
+			return err
+		}
+
+		snapshotData := &refs.SnapshotData{
+			Refs:    refsMap,
+			Members: members,
+		}
+
+		snapshot.Data, err = refs.EncodeSnapshot(snapshotData)
+		if err != nil {
+			return err
+		}
+
 		return nil
 	}); err != nil {
 		return snapshot, err

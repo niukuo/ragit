@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/niukuo/ragit/refs"
@@ -23,13 +24,12 @@ func (l *emptyListener) Check(map[string]refs.Hash) error {
 	return nil
 }
 
-func (l *emptyListener) FetchObjects(refMap map[string]refs.Hash, nodeID refs.PeerID) error {
-	if nodeID == 0 {
+func (l *emptyListener) FetchObjects(refMap map[string]refs.Hash, addrs []string) error {
+	if len(addrs) == 0 {
 		return errors.New("nodeID should not be zero")
 	}
 
-	port := nodeID.GetPort()
-	if port == 8080 { //return error for specific port
+	if strings.Contains(strings.Join(addrs, ","), "8080") { //return error for specific port
 		return errors.New("fetchObjects should not be call at when nodeID port is 8080")
 	}
 	return nil

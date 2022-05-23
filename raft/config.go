@@ -3,6 +3,7 @@ package raft
 import (
 	"time"
 
+	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/pkg/types"
 	"go.etcd.io/etcd/raft"
 )
@@ -14,6 +15,8 @@ type config struct {
 	raft.Config
 	StateMachine
 	Storage
+	NewMemberID func(addr []string) refs.PeerID
+	LocalAddrs []string
 }
 
 func NewConfig() Config {

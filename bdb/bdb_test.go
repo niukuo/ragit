@@ -10,12 +10,16 @@ import (
 	"github.com/niukuo/ragit/bdb"
 	"github.com/niukuo/ragit/dbtest"
 	"github.com/niukuo/ragit/logging"
+	"github.com/niukuo/ragit/refs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
 	"go.etcd.io/bbolt"
 )
 
 var flagDBPath = flag.String("bdbpath", "mydb", "db path")
+var getLocalID = func() (refs.PeerID, error) {
+	return 222, nil
+}
 
 func TestDB(t *testing.T) {
 	s := assert.New(t)
@@ -24,7 +28,7 @@ func TestDB(t *testing.T) {
 		os.RemoveAll(path)
 		opts := bdb.NewOptions()
 		opts.Logger = logging.GetLogger("")
-		db, err := bdb.Open(path, opts)
+		db, err := bdb.Open(path, opts, getLocalID)
 		s.NoError(err)
 
 		return db
@@ -39,7 +43,17 @@ func TestSM(t *testing.T) {
 		opts := bdb.NewOptions()
 		opts.Listener = &emptyListener{}
 		opts.Logger = logging.GetLogger("")
-		db, err := bdb.Open(path, opts)
+		db, err := bdb.Open(path, opts, getLocalID)
+		s.NoError(err)
+		m1 := refs.NewMember(refs.PeerID(111), []string{"http://127.0.0.1:2022"})
+		m2 := refs.NewMember(refs.PeerID(222), []string{"http://127.0.0.2:2022"})
+		m3 := refs.NewMember(refs.PeerID(333), []string{"http://127.0.0.3:2022"})
+		members := []*refs.Member{
+			m1,
+			m2,
+			m3,
+		}
+		err = db.Bootstrap(members)
 		s.NoError(err)
 
 		return db

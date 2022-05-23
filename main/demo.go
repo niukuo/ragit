@@ -8,31 +8,29 @@ import (
 	_ "net/http/pprof"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/niukuo/ragit/api"
 	"github.com/niukuo/ragit/bdb"
 	"github.com/niukuo/ragit/gitexec"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/raft"
+	"github.com/niukuo/ragit/refs"
 	etcdraft "go.etcd.io/etcd/raft"
 )
 
+var LocalAddr = flag.String("id", "127.0.0.1:9021", "node ID")
+var PeerAddrs = flag.String("cluster", "127.0.0.1:9021", "comma separated cluster peers")
+
 func main() {
-	cluster := flag.String("cluster", "127.0.0.1:9021", "comma separated cluster peers")
-	id := flag.String("id", "127.0.0.1:9021", "node ID")
+
 	flag.Parse()
 
-	myid, err := raft.ParsePeerID(*id)
-	if err != nil {
-		log.Fatalln(err)
-	}
+	myid := refs.ComputePeerID([]string{*LocalAddr}, nil)
 
 	peers := make([]raft.PeerID, 0)
-	for _, peer := range strings.Split(*cluster, ",") {
-		id, err := raft.ParsePeerID(peer)
-		if err != nil {
-			log.Fatalln(err)
-		}
+	for _, peerAddr := range strings.Split(*LocalAddr, ",") {
+		id := refs.ComputePeerID([]string{peerAddr}, nil)
 		peers = append(peers, id)
 	}
 
@@ -47,7 +45,7 @@ func main() {
 	opts.Listener = listener
 	opts.Logger = logging.GetLogger("")
 
-	storage, err := bdb.Open(dir, opts)
+	storage, err := bdb.Open(dir, opts, getLocalID)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -55,7 +53,13 @@ func main() {
 	if hardState, confState, err := storage.InitialState(); err != nil {
 		log.Fatalln(err)
 	} else if etcdraft.IsEmptyHardState(hardState) && len(confState.Learners)+len(confState.Voters) == 0 {
-		if err := storage.Bootstrap(peers); err != nil {
+		members := make([]*refs.Member, 0)
+		peerAddrs := strings.Split(*PeerAddrs, ",")
+		for _, addr := range peerAddrs {
+			memberID := refs.ComputePeerID([]string{addr}, nil)
+			members = append(members, refs.NewMember(memberID, []string{addr}))
+		}
+		if err := storage.Bootstrap(members); err != nil {
 			log.Fatalln("bootstrap failed: ", err)
 		}
 	}
@@ -88,7 +92,7 @@ func main() {
 	mux.Handle("/refs/", api.NewHandler(storage, node))
 	mux.Handle("/repo.git/", http.StripPrefix("/repo.git", api.NewGitHandler("repo.git", storage, node, logging.GetLogger("repo.git"))))
 
-	log.Fatalln(http.ListenAndServe(myid.Addr(), LogHandler(mux)))
+	log.Fatalln(http.ListenAndServe(fmt.Sprintf("%v:%v", uint32(myid>>32), uint16(myid)), LogHandler(mux)))
 }
 
 func LogHandler(def http.Handler) http.Handler {
@@ -96,4 +100,16 @@ func LogHandler(def http.Handler) http.Handler {
 		fmt.Println(r.Method, r.URL)
 		def.ServeHTTP(w, r)
 	})
+}
+
+func getLocalID() (refs.PeerID, error) {
+	localID := refs.ComputePeerID([]string{*LocalAddr}, nil)
+
+	return localID, nil
+}
+
+func NewMemberID(addr []string) refs.PeerID {
+	now := time.Now()
+	memberID := refs.ComputePeerID(addr, &now)
+	return memberID
 }

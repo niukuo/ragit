@@ -3,6 +3,7 @@ package raft
 import (
 	"io"
 
+	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/raft"
 	pb "go.etcd.io/etcd/raft/raftpb"
 )
@@ -12,6 +13,8 @@ type InitialState struct {
 
 	ConfState pb.ConfState
 	ConfIndex uint64
+	LocalID   uint64
+	Members   []*refs.Member
 }
 
 type Storage interface {
@@ -19,6 +22,8 @@ type Storage interface {
 
 	GetInitState() (*InitialState, error)
 	Save(hardState pb.HardState, entries []pb.Entry) error
+
+	GetMemberAddrs(memberID refs.PeerID) ([]string, error)
 
 	Describe(w io.Writer)
 
