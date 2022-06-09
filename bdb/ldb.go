@@ -339,7 +339,11 @@ func (s *ldbWALStorage) Term(i uint64) (uint64, error) {
 }
 
 func (s *ldbWALStorage) FirstIndex() (uint64, error) {
-	return atomic.LoadUint64(&s.firstIndex) + 1, nil
+	if val := atomic.LoadUint64(&s.firstIndex); val <= 1 {
+		return 1, nil
+	} else {
+		return val + 1, nil
+	}
 }
 
 func (s *ldbWALStorage) LastIndex() (uint64, error) {
