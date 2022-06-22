@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -405,14 +406,11 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 			return err
 		}
 
-		var m refs.Member
-		err = json.Unmarshal(cc.Context, &m)
+		members, err := getChangeMembers(cc)
 		if err != nil {
 			return err
 		}
-		members := []*refs.Member{
-			&m,
-		}
+
 		if err := rc.executor.OnConfState(entry.Index,
 			*confState, members, cc.Type); err != nil {
 			return err
@@ -421,8 +419,10 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 		switch typ := cc.Type; typ {
 		case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
 			if cc.NodeID != uint64(rc.id) {
-				rc.transport.AddPeer(types.ID(cc.NodeID), m.PeerAddrs)
-				rc.raftLogger.Infof("transport.AddPeer of id %v", m.PeerAddrs)
+				for _, m := range members {
+					rc.transport.AddPeer(types.ID(cc.NodeID), m.PeerAddrs)
+					rc.raftLogger.Infof("transport.AddPeer of id %v", m.PeerAddrs)
+				}
 			}
 		case pb.ConfChangeRemoveNode:
 			if cc.NodeID == uint64(rc.id) {
@@ -441,6 +441,29 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 	}
 
 	return nil
+}
+
+func getChangeMembers(cc pb.ConfChange) ([]*refs.Member, error) {
+	var m refs.Member
+	if cc.Type == pb.ConfChangeRemoveNode {
+		if len(cc.Context) != 0 {
+			return nil, fmt.Errorf("remove node cc context not nil")
+		}
+		m = refs.Member{
+			ID: refs.PeerID(cc.NodeID),
+		}
+	} else {
+		dec := json.NewDecoder(strings.NewReader(string(cc.Context)))
+		dec.DisallowUnknownFields()
+		err := dec.Decode(&m)
+		if err != nil {
+			return nil, err
+		}
+	}
+	members := []*refs.Member{
+		&m,
+	}
+	return members, nil
 }
 
 func (rc *readyHandler) mayTransferLeader() {
