@@ -3,6 +3,7 @@ module github.com/niukuo/ragit
 go 1.12
 
 require (
+	github.com/go-git/go-billy/v5 v5.0.0
 	github.com/go-git/go-git/v5 v5.1.0
 	github.com/gogo/protobuf v1.2.1
 	github.com/golang/protobuf v1.3.2
