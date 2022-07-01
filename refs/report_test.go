@@ -1,11 +1,22 @@
 package refs
 
 import (
-	"errors"
-	"os"
+	"bytes"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func TestReportError(t *testing.T) {
-	ReportError(os.Stderr, errors.New("my test"))
+func TestReportReveivePackError(t *testing.T) {
+	s := assert.New(t)
+	buf := bytes.NewBufferString("")
+	ReportReveivePackError(buf, "my test")
+	s.EqualValues("0018unpack err: my test\n0000", buf.String())
+}
+
+func TestUploadPackError(t *testing.T) {
+	s := assert.New(t)
+	buf := bytes.NewBufferString("")
+	ReportUploadPackError(buf, "my test")
+	s.EqualValues("0008NAK\n000c\x03my test0000", buf.String())
 }

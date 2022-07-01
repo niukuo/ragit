@@ -645,7 +645,7 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 				s.logger.Warningf("old target check failed for %s, expected: %x, actual: %x",
 					name, oldTarget, currentTarget)
 				if out != nil {
-					refs.ReportError(out, fmt.Errorf("fetch first"))
+					refs.ReportReveivePackError(out, "fetch first")
 				}
 				return nil
 			}
@@ -674,7 +674,7 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 
 		if len(oplog.Ops) > 0 {
 			if err := s.listener.Apply(ctx, oplog, out); err != nil {
-				refs.ReportError(out, err)
+				refs.ReportReveivePackError(out, err.Error())
 				return err
 			}
 

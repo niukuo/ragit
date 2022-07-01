@@ -80,6 +80,12 @@ func (h *httpGitAPI) AdvertisedReferences(service Service) (*packp.AdvRefs, erro
 		}
 	}
 
+	if service == Service_UploadPack {
+		if err := ar.Capabilities.Set(capability.Sideband64k); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := ar.Capabilities.Set(capability.OFSDelta); err != nil {
 		return nil, err
 	}
@@ -138,6 +144,7 @@ func (h *httpGitAPI) GetRefs(w http.ResponseWriter, r *http.Request) {
 
 	info, err := h.AdvertisedReferences(service)
 	if err != nil {
+		h.logger.Errorf("AdvertisedReferences failed, err: %v, service: %v", err, service)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -148,11 +155,6 @@ func (h *httpGitAPI) GetRefs(w http.ResponseWriter, r *http.Request) {
 	info.Encode(w)
 }
 
-func reportError(w http.ResponseWriter, err error, statusCode int) {
-	w.WriteHeader(statusCode)
-	refs.ReportError(w, err)
-}
-
 func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 
 	req := packp.NewReferenceUpdateRequest()
@@ -161,7 +163,8 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength == 4 {
 		c, err := ioutil.ReadAll(reader)
 		if err != nil {
-			reportError(w, err, http.StatusBadRequest)
+			h.logger.Errorf("ioutil.ReadAll failed, err: %v", err)
+			refs.ReportReveivePackError(w, err.Error())
 			return
 		}
 		if string(c) == "0000" {
@@ -171,13 +174,15 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := req.Decode(reader); err != nil {
-		reportError(w, err, http.StatusBadRequest)
+		h.logger.Errorf("req.Decode failed, err: %v", err)
+		refs.ReportReveivePackError(w, err.Error())
 		return
 	}
 
 	content, err := ioutil.ReadAll(req.Packfile)
 	if err != nil {
-		reportError(w, err, http.StatusInternalServerError)
+		h.logger.Errorf("ioutil.ReadAll failed, err: %v", err)
+		refs.ReportReveivePackError(w, err.Error())
 		return
 	}
 
@@ -200,7 +205,8 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.node.Propose(raft.WithResponseWriter(r.Context(), w), oplog); err != nil {
-		reportError(w, err, http.StatusBadRequest)
+		h.logger.Errorf("propose failed, err: %v", err)
+		refs.ReportReveivePackError(w, err.Error())
 		return
 	}
 
@@ -213,8 +219,13 @@ func (h *httpGitAPI) UploadPack(w http.ResponseWriter, r *http.Request) {
 func (h *httpGitAPI) serviceRPC(w http.ResponseWriter, r *http.Request, service string) {
 	defer r.Body.Close()
 
-	if r.Header.Get("Content-Type") != fmt.Sprintf("application/x-git-%s-request", service) {
-		w.WriteHeader(http.StatusUnauthorized)
+	actualContentType := r.Header.Get("Content-Type")
+	expectContentType := fmt.Sprintf("application/x-git-%s-request", service)
+	if actualContentType != expectContentType {
+		errorMessage := fmt.Sprintf("Content-Type not support, actualContentType: %v, expectContentType: %v",
+			actualContentType, expectContentType)
+		h.logger.Error(errorMessage)
+		refs.ReportUploadPackError(w, errorMessage)
 		return
 	}
 	w.Header().Set("Content-Type", fmt.Sprintf("application/x-git-%s-result", service))
@@ -228,7 +239,8 @@ func (h *httpGitAPI) serviceRPC(w http.ResponseWriter, r *http.Request, service 
 	if r.Header.Get("Content-Encoding") == "gzip" {
 		reqBody, err = gzip.NewReader(reqBody)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			h.logger.Errorf("gzip.NewReader failed, err: %v", err)
+			refs.ReportUploadPackError(w, err.Error())
 			return
 		}
 	}
@@ -246,7 +258,7 @@ func (h *httpGitAPI) serviceRPC(w http.ResponseWriter, r *http.Request, service 
 	cmd.Stderr = &stderr
 	cmd.Stdin = reqBody
 	if err := cmd.Run(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		refs.ReportUploadPackError(w, err.Error())
 		h.logger.Warning("run cmd failed, args: ", args,
 			", err: ", err,
 			", stderr: ", stderr.String())
