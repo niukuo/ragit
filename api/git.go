@@ -84,6 +84,9 @@ func (h *httpGitAPI) AdvertisedReferences(service Service) (*packp.AdvRefs, erro
 		if err := ar.Capabilities.Set(capability.Sideband64k); err != nil {
 			return nil, err
 		}
+		if err := ar.Capabilities.Set(capability.MultiACKDetailed); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := ar.Capabilities.Set(capability.OFSDelta); err != nil {
