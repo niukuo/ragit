@@ -239,10 +239,10 @@ func (l *listener) FetchObjects(refsMap map[string]refs.Hash, addrs []string) er
 			endpoint = epoint
 			break
 		}
-		l.logger.Warningf("[listener.FetchObjects] transport NewEndpoint failed, err: %v, addr=%v", err, addr)
+		l.logger.Warningf("[listener.FetchObjects] transport NewEndpoint failed, err: %v, addr: %v", err, addr)
 	}
 	if endpoint == nil {
-		return fmt.Errorf("[listener.FetchObjects] transport NewEndpoint failed, addrs=%v", addrs)
+		return fmt.Errorf("[listener.FetchObjects] transport NewEndpoint failed, addrs: %v", addrs)
 	}
 
 	gitClient := http.DefaultClient

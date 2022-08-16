@@ -3,6 +3,7 @@ package raft
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -75,11 +76,11 @@ func RunNode(c Config) (Node, error) {
 	}
 
 	if c.NewMemberID == nil {
-		return nil, fmt.Errorf("NewMemberID is nil")
+		return nil, errors.New("NewMemberID is nil")
 	}
 
-	if c.LocalAddrs == nil || len(c.LocalAddrs) == 0 {
-		return nil, fmt.Errorf("LocalAddrs is empty")
+	if len(c.LocalAddrs) == 0 {
+		return nil, errors.New("LocalAddrs is empty")
 	}
 
 	r := NewRaft(c)
@@ -447,7 +448,7 @@ func getChangeMembers(cc pb.ConfChange) ([]*refs.Member, error) {
 	var m refs.Member
 	if cc.Type == pb.ConfChangeRemoveNode {
 		if len(cc.Context) != 0 {
-			return nil, fmt.Errorf("remove node cc context not nil")
+			return nil, errors.New("remove node cc context not nil")
 		}
 		m = refs.Member{
 			ID: refs.PeerID(cc.NodeID),

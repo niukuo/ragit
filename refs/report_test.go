@@ -10,7 +10,7 @@ import (
 func TestReportReveivePackError(t *testing.T) {
 	s := assert.New(t)
 	buf := bytes.NewBufferString("")
-	ReportReveivePackError(buf, "my test")
+	ReportReceivePackError(buf, "my test")
 	s.EqualValues("0018unpack err: my test\n0000", buf.String())
 }
 

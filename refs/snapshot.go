@@ -14,7 +14,7 @@ func DecodeSnapshot(data []byte) (*SnapshotData, error) {
 	var snapshotData SnapshotData
 	err := json.Unmarshal(data, &snapshotData)
 	if err != nil {
-		return nil, fmt.Errorf("Unmarshal snapshotData failed, err=%v", err)
+		return nil, fmt.Errorf("Unmarshal snapshotData failed, err: %w", err)
 	}
 
 	return &snapshotData, nil

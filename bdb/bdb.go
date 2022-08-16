@@ -336,12 +336,12 @@ func (s *storage) GetMemberAddrs(memberID refs.PeerID) ([]string, error) {
 		binary.BigEndian.PutUint64(key[:], uint64(memberID))
 		val := membersb.Get(key[:])
 		if val == nil {
-			return fmt.Errorf("member not exist, memberID=%v", uint64(memberID))
+			return fmt.Errorf("member not exist, memberID: %v", uint64(memberID))
 		}
 
 		var mInDB memberInDB
 		if err := json.Unmarshal(val, &mInDB); err != nil {
-			return fmt.Errorf("unmarshal failed, val=%v", string(val))
+			return fmt.Errorf("unmarshal failed, val: %v", string(val))
 		}
 
 		addrs = mInDB.PeerAddrs
@@ -379,7 +379,7 @@ func saveMembers(s *storage, membersb *bbolt.Bucket, members []*refs.Member, con
 
 		}
 	default:
-		return fmt.Errorf("unsupported conf type=%v", confType)
+		return fmt.Errorf("unsupported conf type: %v", confType)
 	}
 
 	return nil
@@ -522,7 +522,7 @@ func (s *storage) OnSnapshot(
 			Data: append([]byte(fmt.Sprintf("snapshot from %s: ", objSrcNode)),
 				snapshot.Data...),
 		}}); err != nil {
-			return fmt.Errorf("save snapshot wal log, err: %v", err)
+			return fmt.Errorf("save snapshot wal log, err: %w", err)
 		}
 
 		return nil
@@ -572,7 +572,7 @@ func (s *storage) OnConfState(index uint64, confState pb.ConfState, changeMember
 
 func checkMembers(existMembers []*refs.Member, confState pb.ConfState) error {
 	if len(confState.Learners)+len(confState.Voters) != len(existMembers) {
-		return fmt.Errorf("len not equal, confState=%+v, existMembers=%v", confState, existMembers)
+		return fmt.Errorf("len not equal, confState: %+v, existMembers: %+v", confState, existMembers)
 	}
 
 	confMembers := append(confState.Voters, confState.Learners...)
@@ -585,7 +585,7 @@ func checkMembers(existMembers []*refs.Member, confState pb.ConfState) error {
 			}
 		}
 		if !ok {
-			return fmt.Errorf("member Inconsistent,confState=%v, existMembers=%+v", confState, existMembers)
+			return fmt.Errorf("member Inconsistent,confState: %+v, existMembers: %+v", confState, existMembers)
 		}
 	}
 
@@ -645,7 +645,7 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 				s.logger.Warningf("old target check failed for %s, expected: %x, actual: %x",
 					name, oldTarget, currentTarget)
 				if out != nil {
-					refs.ReportReveivePackError(out, "fetch first")
+					refs.ReportReceivePackError(out, "fetch first")
 				}
 				return nil
 			}
@@ -674,7 +674,7 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 
 		if len(oplog.Ops) > 0 {
 			if err := s.listener.Apply(ctx, oplog, out); err != nil {
-				refs.ReportReveivePackError(out, err.Error())
+				refs.ReportReceivePackError(out, err.Error())
 				return err
 			}
 

@@ -36,7 +36,7 @@ func TestRepeatPushPull(t *testing.T) {
 	err := runCmd.Run()
 	s.NoError(err)
 
-	gitConfigCmd := "git config user.email abc@alibaba.com; git config user.name abc"
+	gitConfigCmd := "cd test/pushPath; git config user.email abc@alibaba.com; git config user.name abc; cd ../pullPath; git config user.email abc@alibaba.com; git config user.name abc"
 	runCmd = exec.Command("/bin/bash", "-c", gitConfigCmd)
 	err = runCmd.Run()
 	s.NoError(err)

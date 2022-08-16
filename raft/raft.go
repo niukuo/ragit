@@ -166,7 +166,7 @@ func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.
 
 			if err := func() error {
 				if nextIndex == 0 {
-					return fmt.Errorf("not leader, cant propose")
+					return errors.New("not leader, cant propose")
 				}
 
 				if msg.expectedTerm != 0 && msg.expectedTerm != term {

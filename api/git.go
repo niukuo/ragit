@@ -167,7 +167,7 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		c, err := ioutil.ReadAll(reader)
 		if err != nil {
 			h.logger.Errorf("ioutil.ReadAll failed, err: %v", err)
-			refs.ReportReveivePackError(w, err.Error())
+			refs.ReportReceivePackError(w, err.Error())
 			return
 		}
 		if string(c) == "0000" {
@@ -178,14 +178,14 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 
 	if err := req.Decode(reader); err != nil {
 		h.logger.Errorf("req.Decode failed, err: %v", err)
-		refs.ReportReveivePackError(w, err.Error())
+		refs.ReportReceivePackError(w, err.Error())
 		return
 	}
 
 	content, err := ioutil.ReadAll(req.Packfile)
 	if err != nil {
 		h.logger.Errorf("ioutil.ReadAll failed, err: %v", err)
-		refs.ReportReveivePackError(w, err.Error())
+		refs.ReportReceivePackError(w, err.Error())
 		return
 	}
 
@@ -209,7 +209,7 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.node.Propose(raft.WithResponseWriter(r.Context(), w), oplog); err != nil {
 		h.logger.Errorf("propose failed, err: %v", err)
-		refs.ReportReveivePackError(w, err.Error())
+		refs.ReportReceivePackError(w, err.Error())
 		return
 	}
 
