@@ -7,6 +7,7 @@ https://github.com/git/git/blob/master/Documentation/technical/http-protocol.txt
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -20,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 	"github.com/golang/protobuf/proto"
+	"github.com/niukuo/ragit/bdb"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
@@ -145,6 +147,19 @@ func (h *httpGitAPI) GetRefs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", fmt.Sprintf("application/x-%s-advertisement", svcStr))
 
+	memberStatus, err := h.getMemberStatus(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	isLead := memberStatus.ID == memberStatus.Lead
+	if !isLead {
+		errMessage := fmt.Sprintf("node:%s is not leader: %s, not allow read or write", memberStatus.ID, memberStatus.Lead)
+		h.logger.Errorf(errMessage)
+		http.Error(w, errMessage, http.StatusForbidden)
+		return
+	}
+
 	info, err := h.AdvertisedReferences(service)
 	if err != nil {
 		h.logger.Errorf("AdvertisedReferences failed, err: %v, service: %v", err, service)
@@ -216,6 +231,19 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *httpGitAPI) UploadPack(w http.ResponseWriter, r *http.Request) {
+	memberStatus, err := h.getMemberStatus(r.Context())
+	if err != nil {
+		refs.ReportUploadPackError(w, err.Error())
+		return
+	}
+	isLead := memberStatus.ID == memberStatus.Lead
+	if !isLead {
+		errMessage := fmt.Sprintf("node:%s is not leader: %s, not allow read", memberStatus.ID, memberStatus.Lead)
+		h.logger.Errorf(errMessage)
+		refs.ReportUploadPackError(w, errMessage)
+		return
+	}
+
 	h.serviceRPC(w, r, "upload-pack")
 }
 
@@ -267,4 +295,21 @@ func (h *httpGitAPI) serviceRPC(w http.ResponseWriter, r *http.Request, service 
 			", stderr: ", stderr.String())
 		return
 	}
+}
+
+func (h *httpGitAPI) getMemberStatus(ctx context.Context) (*raft.MemberStatus, error) {
+	status, err := h.node.GetStatus(ctx)
+	if err != nil {
+		h.logger.Errorf("get status failed, err: %v", err)
+		return nil, err
+	}
+
+	storage := h.rdb.(bdb.Storage)
+	memberStatus, err := status.MemberStatus(storage.GetMemberAddrs)
+	if err != nil {
+		h.logger.Errorf("status.MemberStatus failed, err: %v", err)
+		return nil, err
+	}
+
+	return memberStatus, nil
 }

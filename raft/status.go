@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 
+	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/raft"
 )
 
@@ -38,15 +39,15 @@ func (s Status) String() string {
 	return string(b)
 }
 
-func (s Status) MemberStatus(rh ReadyHandler) (*MemberStatus, error) {
-	idStrs, err := rh.GetMemberAddrs(PeerID(s.ID))
+func (s Status) MemberStatus(getMemberAddrs func(memberID refs.PeerID) ([]string, error)) (*MemberStatus, error) {
+	idStrs, err := getMemberAddrs(PeerID(s.ID))
 	if err != nil {
 		return nil, err
 	}
 
 	var leadStrs []string
 	if s.Lead != 0 {
-		leadStrs, err = rh.GetMemberAddrs(PeerID(s.Lead))
+		leadStrs, err = getMemberAddrs(PeerID(s.Lead))
 		if err != nil {
 			return nil, err
 		}
@@ -68,7 +69,7 @@ func (s Status) MemberStatus(rh ReadyHandler) (*MemberStatus, error) {
 			State:     v.State.String(),
 			IsLearner: v.IsLearner,
 		}
-		addrs, err := rh.GetMemberAddrs(PeerID(k))
+		addrs, err := getMemberAddrs(PeerID(k))
 		if err != nil {
 			return nil, err
 		}
