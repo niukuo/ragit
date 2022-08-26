@@ -154,7 +154,50 @@ func (rc *readyHandler) getLeaderStat(w http.ResponseWriter, r *http.Request) {
 
 func (rc *readyHandler) getStatus(w http.ResponseWriter, r *http.Request) {
 	rc.raft.Describe(w)
+
+	// TODO: atomic.LoadPointer
+	if doingReadState := rc.readIndexDoing; doingReadState != nil {
+		fmt.Fprintf(w, "read_index_doing_id: %x\n", doingReadState.id)
+		fmt.Fprintln(w, "read_index_doing_term: ", doingReadState.term)
+	}
+
 	rc.storage.Describe(w)
+}
+
+func (rc *readyHandler) getReadIndex(w http.ResponseWriter, r *http.Request) {
+	state := rc.proposeReadIndex()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 1*time.Second)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		fmt.Fprint(w, ctx.Err())
+		return
+	case <-rc.Runner.Done():
+		fmt.Fprintf(w, "err: %s\n", ErrStopped)
+		return
+	case <-state.proposed:
+		fmt.Fprintf(w, "ctx: %x\n", state.id)
+		fmt.Fprintf(w, "term: %d\n", state.term)
+	}
+
+	ctx, cancel = context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		fmt.Fprint(w, ctx.Err())
+	case <-state.done:
+		if err := state.err; err != nil {
+			fmt.Fprint(w, err)
+		} else {
+			fmt.Fprintf(w, "index: %d\n", state.index)
+		}
+	case <-rc.Runner.Done():
+		fmt.Fprint(w, ErrStopped)
+	}
+
 }
 
 func (rc *raftNode) Describe(w io.Writer) {

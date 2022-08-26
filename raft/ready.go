@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
@@ -35,6 +37,18 @@ type ReadyHandler interface {
 	GetMemberAddrs(memberID refs.PeerID) ([]string, error)
 }
 
+type readIndexState struct {
+	triggered chan struct{}
+
+	term     uint64
+	id       uint64
+	proposed chan struct{}
+
+	index uint64
+	err   error
+	done  chan struct{}
+}
+
 type readyHandler struct {
 	id refs.PeerID
 
@@ -47,7 +61,9 @@ type readyHandler struct {
 	advanceC         chan struct{}
 	fetchingSnapshot int32
 
-	reqIDGen *idutil.Generator
+	readIndexIDGen *idutil.Generator
+	readIndexNext  unsafe.Pointer
+	readIndexDoing *readIndexState
 
 	executor  Executor
 	confIndex uint64
@@ -118,7 +134,12 @@ func RunNode(c Config) (Node, error) {
 		readyC:   make(chan (<-chan *raft.Ready)),
 		advanceC: make(chan struct{}),
 
-		reqIDGen: idutil.NewGenerator(uint16(c.ID), time.Now()),
+		readIndexIDGen: idutil.NewGenerator(uint16(c.ID), time.Now()),
+		readIndexNext: unsafe.Pointer(&readIndexState{
+			triggered: make(chan struct{}, 1),
+			proposed:  make(chan struct{}),
+			done:      make(chan struct{}),
+		}),
 
 		executor:  executor,
 		confIndex: state.ConfIndex,
@@ -273,6 +294,12 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 
 	for {
 		var rd *raft.Ready
+
+		var readIndexC <-chan struct{}
+		if rc.readIndexDoing == nil {
+			readIndexC = (*readIndexState)(rc.readIndexNext).triggered
+		}
+
 		select {
 		case <-stopC:
 			return nil
@@ -285,6 +312,29 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			rc.eventLogger.Warning("executor stopped unexpectedly, err: ",
 				rc.executor.Error())
 			return nil
+
+		case <-readIndexC:
+			rstate := (*readIndexState)(rc.readIndexNext)
+
+			newState := &readIndexState{
+				triggered: make(chan struct{}, 1),
+				proposed:  make(chan struct{}),
+				done:      make(chan struct{}),
+			}
+			atomic.StorePointer(&rc.readIndexNext, unsafe.Pointer(newState))
+
+			rstate.id = rc.readIndexIDGen.Next()
+			rstate.term = hardState.Term
+			close(rstate.proposed)
+			var rctx [8]byte
+			binary.BigEndian.PutUint64(rctx[:], rstate.id)
+			if err := rc.raft.proposeReadIndex(context.TODO(), rctx[:]); err != nil {
+				rstate.err = err
+				close(rstate.done)
+			} else {
+				rc.readIndexDoing = rstate
+			}
+			continue
 
 		case ch := <-rc.readyC:
 			select {
@@ -314,8 +364,34 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			}
 		}
 
-		if len(rd.ReadStates) != 0 {
-			rc.raft.setReadStates(rd.ReadStates)
+		for _, rstate := range rd.ReadStates {
+			id := binary.BigEndian.Uint64(rstate.RequestCtx)
+			if rc.readIndexDoing != nil && rc.readIndexDoing.id == id {
+				state := rc.readIndexDoing
+				rc.readIndexDoing = nil
+				state.index = rstate.Index
+				close(state.done)
+			} else {
+				rc.raftLogger.Info("read index",
+					", id: ", id,
+					", index: ", rstate.Index,
+				)
+			}
+		}
+
+		if !raft.IsEmptyHardState(rd.HardState) {
+			if rc.readIndexDoing != nil &&
+				rc.readIndexDoing.term != hardState.Term {
+				state := rc.readIndexDoing
+				rc.readIndexDoing = nil
+				state.err = errors.New("term changed")
+				close(state.done)
+				rc.raftLogger.Warning("read index term changed",
+					", id: ", strconv.FormatUint(state.id, 16),
+					", term: ", state.term,
+					", new_term: ", hardState.Term,
+				)
+			}
 		}
 
 		// save snapshot first. if HardState.Commit is saved and snapshot apply failed,
@@ -531,6 +607,7 @@ func (rc *readyHandler) InitRouter(mux *http.ServeMux) {
 	mux.Handle("/raft", rh)
 	mux.Handle("/raft/", rh)
 	mux.HandleFunc("/raft/status", rc.getStatus)
+	mux.HandleFunc("/raft/read_index", rc.getReadIndex)
 	mux.HandleFunc("/raft/wal", rc.getWAL)
 	mux.HandleFunc("/raft/snapshot", rc.getSnapshot)
 	mux.HandleFunc("/raft/server_stat", rc.getServerStat)
@@ -577,10 +654,32 @@ func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog) error {
 	return nil
 }
 
+func (rc *readyHandler) proposeReadIndex() *readIndexState {
+
+	state := (*readIndexState)(atomic.LoadPointer(&rc.readIndexNext))
+	select {
+	case state.triggered <- struct{}{}:
+	default:
+	}
+
+	return state
+}
+
 func (rc *readyHandler) ReadIndex(ctx context.Context) (uint64, error) {
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	return rc.raft.getReadIndex(ctxWithTimeout, rc.reqIDGen.Next())
+
+	state := rc.proposeReadIndex()
+
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-state.done:
+		if err := state.err; err != nil {
+			return 0, err
+		}
+		return state.index, nil
+	case <-rc.Runner.Done():
+		return 0, ErrStopped
+	}
 }
 
 func (rc *readyHandler) GetStatus(ctx context.Context) (*Status, error) {
