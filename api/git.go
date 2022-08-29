@@ -20,7 +20,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
-	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/bdb"
 	"github.com/niukuo/ragit/gitexec"
 	"github.com/niukuo/ragit/logging"
@@ -198,19 +197,25 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var oplog refs.Oplog
+	var refNames []plumbing.ReferenceName
+	for _, cmd := range req.Commands {
+		refNames = append(refNames, cmd.Name)
+	}
+
+	tx, err := h.node.BeginTx(r.Context(), refNames...)
+	if err != nil {
+		h.logger.Warning("begin tx failed, err: ", err)
+		refs.ReportReceivePackError(w, err.Error())
+		return
+	}
+	defer tx.Close()
 
 	for _, cmd := range req.Commands {
-		op := &refs.Oplog_Op{
-			Name: proto.String(cmd.Name.String()),
+		if hash := tx.Get(cmd.Name); hash != cmd.Old {
+			refs.ReportReceivePackError(w, "fetch first")
+			return
 		}
-		if !cmd.New.IsZero() {
-			op.Target = cmd.New[:]
-		}
-		if !cmd.Old.IsZero() {
-			op.OldTarget = cmd.Old[:]
-		}
-		oplog.Ops = append(oplog.Ops, op)
+		tx.Set(cmd.Name, cmd.New)
 	}
 
 	content, err := ioutil.ReadAll(req.Packfile)
@@ -219,11 +224,10 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		refs.ReportReceivePackError(w, err.Error())
 		return
 	}
-	oplog.ObjPack = content
 
 	writerCh := make(chan io.Writer)
 	defer close(writerCh)
-	rreq, err := h.node.Propose(r.Context(), oplog, gitexec.WriterCh(writerCh))
+	rreq, err := tx.Commit(r.Context(), content, gitexec.WriterCh(writerCh))
 	if err != nil {
 		h.logger.Errorf("propose failed, err: %v", err)
 		refs.ReportReceivePackError(w, err.Error())

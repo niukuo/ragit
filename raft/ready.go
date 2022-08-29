@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -13,6 +14,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/etcdserver/api/rafthttp"
@@ -64,6 +67,8 @@ type readyHandler struct {
 	readIndexIDGen *idutil.Generator
 	readIndexNext  unsafe.Pointer
 	readIndexDoing *readIndexState
+
+	txnLocker MapLocker
 
 	executor  Executor
 	confIndex uint64
@@ -140,6 +145,8 @@ func RunNode(c Config) (Node, error) {
 			proposed:  make(chan struct{}),
 			done:      make(chan struct{}),
 		}),
+
+		txnLocker: NewMapLocker(),
 
 		executor:  executor,
 		confIndex: state.ConfIndex,
@@ -640,7 +647,40 @@ func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog, handle re
 
 	start := time.Now()
 
-	req, err := rc.raft.Propose(ctx, oplog, handle)
+	tx, err := rc.BeginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	defer tx.Close()
+
+	for _, op := range oplog.Ops {
+		refName := plumbing.ReferenceName(op.GetName())
+		hash := tx.Get(refName)
+		switch l := len(op.OldTarget); l {
+		case 0:
+			if !hash.IsZero() {
+				return nil, fmt.Errorf("ref %s already exist: %s", refName, hash)
+			}
+		default:
+			if hash.IsZero() || !bytes.Equal(hash[:], op.OldTarget) {
+				return nil, fmt.Errorf("ref %s not match", refName)
+			}
+		}
+		switch l := len(op.Target); l {
+		case 0:
+			hash = plumbing.Hash{}
+		case len(hash):
+			copy(hash[:], op.Target)
+		default:
+			return nil, fmt.Errorf("invalid target for %s: %x", refName, op.Target)
+		}
+		if err := tx.Set(refName, hash); err != nil {
+			return nil, err
+		}
+	}
+
+	req, err := tx.Commit(ctx, oplog.ObjPack, handle)
 	if err != nil {
 		return nil, err
 	}
@@ -694,4 +734,90 @@ func (rc *readyHandler) GetStatus(ctx context.Context) (*Status, error) {
 	}
 
 	return &status, nil
+}
+
+// start a new tx.
+// if refNames is empty, a global lock will hold
+func (rc *readyHandler) BeginTx(ctx context.Context,
+	refNames ...plumbing.ReferenceName,
+) (*Tx, error) {
+
+	term := rc.storage.GetLeaderTerm()
+	if term == 0 {
+		return nil, errors.New("not leader")
+	}
+
+	var unlocker Unlocker = func() {}
+
+	for _, refName := range refNames {
+		u, err := rc.txnLocker.Lock(ctx, refName)
+		if err != nil {
+			unlocker()
+			return nil, fmt.Errorf("lock ref %s failed, err: %w", refName, err)
+		}
+		u2 := unlocker
+		unlocker = Unlocker(func() {
+			u()
+			u2()
+		})
+	}
+
+	global := len(refNames) == 0
+
+	if global {
+		if err := rc.txnLocker.LockGlobal(ctx); err != nil {
+			return nil, err
+		}
+		unlocker = rc.txnLocker.UnlockGlobal
+	}
+
+	if t := rc.storage.GetLeaderTerm(); t == 0 {
+		unlocker()
+		return nil, fmt.Errorf("leader lost after lock, term: %d", term)
+	} else if t != term {
+		rc.raftLogger.Warning("term changed",
+			", before: ", term,
+			", now: ", t,
+		)
+		term = t
+	}
+
+	stx := &Tx{
+		rc: rc.raft,
+
+		term:     term,
+		unlocker: unlocker,
+
+		global: global,
+		cmds:   make(map[plumbing.ReferenceName]*packp.Command),
+	}
+
+	allRefs, err := rc.storage.GetAllRefs()
+	if err != nil {
+		unlocker()
+		return nil, err
+	}
+
+	if global {
+		for refName, hash := range allRefs {
+			refName := plumbing.ReferenceName(refName)
+			stx.cmds[refName] = &packp.Command{
+				Name: refName,
+				Old:  plumbing.Hash(hash),
+				New:  plumbing.Hash(hash),
+			}
+		}
+	} else {
+		for _, refName := range refNames {
+			hash := plumbing.Hash(allRefs[string(refName)])
+			stx.cmds[refName] = &packp.Command{
+				Name: refName,
+				Old:  hash,
+				New:  hash,
+			}
+		}
+
+	}
+
+	return stx, nil
 }

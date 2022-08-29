@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/niukuo/ragit/logging"
@@ -37,6 +38,8 @@ type storage struct {
 	db       *bbolt.DB
 
 	state pb.HardState
+
+	leaderTerm uint64
 
 	logger logging.Logger
 
@@ -927,11 +930,21 @@ func (s *storage) GetRefs(name string) (refs.Hash, error) {
 }
 
 func (s *storage) OnLeaderStart(term uint64) {
+	if t := atomic.SwapUint64(&s.leaderTerm, term); t != 0 {
+		panic(fmt.Errorf("OnLeaderStart called with leaderTerm == %d", t))
+	}
 	s.listener.OnLeaderStart(term)
 }
 
 func (s *storage) OnLeaderStop() {
+	if curLeaderTerm := atomic.SwapUint64(&s.leaderTerm, 0); curLeaderTerm == 0 {
+		panic(errors.New("OnLeaderStop called with leaderTerm == 0"))
+	}
 	s.listener.OnLeaderStop()
+}
+
+func (s *storage) GetLeaderTerm() uint64 {
+	return atomic.LoadUint64(&s.leaderTerm)
 }
 
 func (s *storage) Describe(w io.Writer) {

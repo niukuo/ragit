@@ -24,6 +24,8 @@ type Storage interface {
 	Save(hardState pb.HardState, entries []pb.Entry) error
 
 	GetMemberAddrs(memberID refs.PeerID) ([]string, error)
+	GetLeaderTerm() uint64
+	GetAllRefs() (map[string]refs.Hash, error)
 
 	Describe(w io.Writer)
 

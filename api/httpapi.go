@@ -15,6 +15,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -25,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/protobuf/proto"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/raft/raftpb"
@@ -48,11 +49,16 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		tx, err := h.node.BeginTx(r.Context())
+		if err != nil {
+			log.Printf("begin tx failed, err: %s", err)
+			http.Error(w, "begin tx failed: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer tx.Close()
+
 		lines := strings.Split(strings.TrimSpace(string(v)), "\n")
 
-		oplog := refs.Oplog{
-			Ops: make([]*refs.Oplog_Op, 0, len(lines)),
-		}
 		for _, line := range lines {
 			slices := strings.SplitN(line, " ", 4)
 			if len(slices) != 3 {
@@ -60,9 +66,16 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			refName := slices[2]
+
 			oldTarget, err := hex.DecodeString(slices[0])
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+
+			if hash := tx.Get(plumbing.ReferenceName(refName)); !bytes.Equal(hash[:], oldTarget) {
+				http.Error(w, "not match: "+refName, http.StatusBadRequest)
 				return
 			}
 
@@ -70,18 +83,21 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
+			} else if l := len(target); l != len(plumbing.Hash{}) {
+				http.Error(w, "invalid target: "+refName, http.StatusBadRequest)
+				return
+			} else {
+				var hash plumbing.Hash
+				copy(hash[:], target)
+				if err := tx.Set(plumbing.ReferenceName(refName), hash); err != nil {
+					http.Error(w, "set hash failed: "+err.Error(), http.StatusBadRequest)
+					return
+				}
 			}
 
-			op := &refs.Oplog_Op{
-				Name:      proto.String(slices[2]),
-				OldTarget: oldTarget,
-				Target:    target,
-			}
-
-			oplog.Ops = append(oplog.Ops, op)
 		}
 
-		req, err := h.node.Propose(r.Context(), oplog, nil)
+		req, err := tx.Commit(r.Context(), nil, nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
