@@ -81,9 +81,18 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			oplog.Ops = append(oplog.Ops, op)
 		}
 
-		if err := h.node.Propose(raft.WithResponseWriter(r.Context(), w), oplog); err != nil {
+		req, err := h.node.Propose(r.Context(), oplog, nil)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-req.Done():
+			if err := req.Err(); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		}
 
 	case http.MethodGet:

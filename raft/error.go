@@ -3,11 +3,13 @@ package raft
 import "fmt"
 
 type errTermChanged struct {
-	proposedTerm  uint64
-	committedTerm uint64
+	expTerm uint64
+	curTerm uint64
 }
 
 func (e *errTermChanged) Error() string {
-	return fmt.Sprintf("term changed, proposed: %v, committed: %v",
-		e.proposedTerm, e.committedTerm)
+	if e.expTerm != 0 {
+		return fmt.Sprintf("term changed, exp_term: %d, cur_term: %d", e.expTerm, e.curTerm)
+	}
+	return fmt.Sprintf("term changed, cur_term: %v", e.curTerm)
 }

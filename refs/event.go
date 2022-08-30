@@ -1,9 +1,7 @@
 package refs
 
 import (
-	"context"
 	"fmt"
-	"io"
 )
 
 const (
@@ -12,9 +10,11 @@ const (
 
 type Hash [HashLen]byte
 
+type ReqHandle interface{}
+
 type Listener interface {
 	Check(refs map[string]Hash) error
-	Apply(ctx context.Context, oplog Oplog, w io.Writer) error
+	Apply(oplog Oplog, ctx ReqHandle) error
 	FetchObjects(refs map[string]Hash, addrs []string) error
 	OnLeaderStart(term uint64)
 	OnLeaderStop()

@@ -51,15 +51,24 @@ func NewListener(dir string, logger logging.Logger) (Listener, error) {
 	return l, nil
 }
 
-func (l *listener) Apply(ctx context.Context, oplog refs.Oplog, w io.Writer) error {
+func (l *listener) Apply(oplog refs.Oplog, handle refs.ReqHandle) error {
 
 	cmd := exec.Command("git", "receive-pack", "--stateless-rpc", ".")
 	cmd.Dir = l.dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Pdeathsig: syscall.SIGTERM,
 	}
+	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	cmd.Stdout = w
+
+	var wbuf io.Writer = &stdout
+	if ch, ok := handle.(WriterCh); ok {
+		if w, ok := <-ch; ok {
+			wbuf = io.MultiWriter(wbuf, w)
+		}
+	}
+
+	cmd.Stdout = wbuf
 	cmd.Stderr = &stderr
 
 	stdin, err := cmd.StdinPipe()
@@ -99,7 +108,7 @@ func (l *listener) Apply(ctx context.Context, oplog refs.Oplog, w io.Writer) err
 		return err
 	}
 
-	if _, err := io.Copy(stdin, bytes.NewReader(oplog.ObjPack)); err != nil {
+	if _, err := bytes.NewReader(oplog.ObjPack).WriteTo(stdin); err != nil {
 		return errors.Annotate(err, "write packfile to stdin err")
 	}
 
@@ -108,11 +117,23 @@ func (l *listener) Apply(ctx context.Context, oplog refs.Oplog, w io.Writer) err
 	}
 
 	if err := cmd.Wait(); err != nil {
-		return errors.Annotate(err, "close stdin err")
+		return errors.Annotate(err, "cmd Wait err")
 	}
 
 	if stderr.Len() > 0 {
 		l.logger.Warning("stderr: \n", stderr.String())
+	}
+
+	var status packp.ReportStatus
+	if err := status.Decode(bytes.NewReader(stdout.Bytes())); err != nil {
+		l.logger.Warning("decode report status err: ", err,
+			", out: \n", stdout.String())
+		return err
+	}
+
+	if err := status.Error(); err != nil {
+		l.logger.Warning("refs not updated, err: ", err)
+		return err
 	}
 
 	return nil

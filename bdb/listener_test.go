@@ -1,9 +1,8 @@
 package bdb_test
 
 import (
-	"context"
+	"bytes"
 	"errors"
-	"io"
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
@@ -13,7 +12,8 @@ import (
 type emptyListener struct {
 }
 
-func (l *emptyListener) Apply(ctx context.Context, oplog refs.Oplog, w io.Writer) error {
+func (l *emptyListener) Apply(oplog refs.Oplog, handle refs.ReqHandle) error {
+	w := &bytes.Buffer{}
 	status := packp.ReportStatus{
 		UnpackStatus: "ok",
 	}

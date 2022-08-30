@@ -22,6 +22,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/bdb"
+	"github.com/niukuo/ragit/gitexec"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
@@ -197,17 +198,7 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	content, err := ioutil.ReadAll(req.Packfile)
-	if err != nil {
-		h.logger.Errorf("ioutil.ReadAll failed, err: %v", err)
-		refs.ReportReceivePackError(w, err.Error())
-		return
-	}
-
-	oplog := refs.Oplog{
-		Ops:     make([]*refs.Oplog_Op, 0, len(req.Commands)),
-		ObjPack: content,
-	}
+	var oplog refs.Oplog
 
 	for _, cmd := range req.Commands {
 		op := &refs.Oplog_Op{
@@ -222,10 +213,31 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		oplog.Ops = append(oplog.Ops, op)
 	}
 
-	if err := h.node.Propose(raft.WithResponseWriter(r.Context(), w), oplog); err != nil {
+	content, err := ioutil.ReadAll(req.Packfile)
+	if err != nil {
+		h.logger.Errorf("ioutil.ReadAll failed, err: %v", err)
+		refs.ReportReceivePackError(w, err.Error())
+		return
+	}
+	oplog.ObjPack = content
+
+	writerCh := make(chan io.Writer)
+	defer close(writerCh)
+	rreq, err := h.node.Propose(r.Context(), oplog, gitexec.WriterCh(writerCh))
+	if err != nil {
 		h.logger.Errorf("propose failed, err: %v", err)
 		refs.ReportReceivePackError(w, err.Error())
 		return
+	}
+
+	select {
+	case <-r.Context().Done():
+	case <-rreq.Done():
+		if err := rreq.Err(); err != nil {
+			refs.ReportReceivePackError(w, err.Error())
+		}
+	case writerCh <- w:
+		<-rreq.Done()
 	}
 
 }

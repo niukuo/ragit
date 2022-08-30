@@ -1,25 +1,23 @@
 package raft
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"sync"
 
 	"github.com/niukuo/ragit/logging"
-	pb "go.etcd.io/etcd/raft/raftpb"
+	"github.com/niukuo/ragit/refs"
 )
 
-type doingRequest struct {
-	index  uint64
-	term   uint64
-	result <-chan applyResult
+type DoingRequest interface {
+	Done() <-chan struct{}
+	Err() error
 }
 
 type RequestContextManager = *requestContextManager
 type requestContextManager struct {
 	lock     sync.Mutex
-	requests []doingRequest
+	requests []*doingRequest
 
 	logger logging.Logger
 }
@@ -32,114 +30,37 @@ func NewRequestContextManager() RequestContextManager {
 	return r
 }
 
-func (r *requestContextManager) Check(entries []pb.Entry) {
-	requests, term := r.tryTruncate(entries)
-	if l := len(requests); l > 0 {
-		first, last := &requests[0], &requests[l-1]
-		r.logger.Warningf("dropping %d contexts from %d/%d to %d/%d", l,
-			first.term, first.index, last.term, last.index,
-		)
-	}
-	for i := range requests {
-		req := &requests[i]
-		res, ok := <-req.result
-		if !ok {
-			continue
-		}
-		res.done <- &errTermChanged{
-			proposedTerm:  req.term,
-			committedTerm: term,
-		}
-	}
-}
+func (r *requestContextManager) Append(term, index uint64, msg *msgWithResult) error {
+	req := &doingRequest{
+		index:  index,
+		term:   term,
+		handle: msg.handle,
 
-func (r *requestContextManager) tryTruncate(entries []pb.Entry) ([]doingRequest, uint64) {
-
-	if len(entries) == 0 {
-		return nil, 0
+		done: make(chan struct{}),
 	}
 
-	r.lock.Lock()
-	defer r.lock.Unlock()
-
-	if len(r.requests) == 0 {
-		return nil, 0
-	}
-
-	for i, j := 0, 0; i < len(r.requests) && j < len(entries); {
-		req := &r.requests[i]
-		entry := &entries[j]
-		if req.index < entry.Index {
-			i++
-			continue
-		}
-		if req.term < entry.Term {
-			drops := r.requests[i:]
-			r.requests = r.requests[:i]
-			return drops, entry.Term
-		}
-
-		j++
-		if req.index == entry.Index {
-			i++
-		}
-	}
-
-	return nil, 0
-}
-
-func (r *requestContextManager) Append(term, index uint64, resCh <-chan applyResult) error {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	if l := len(r.requests); l > 0 {
-		last := &r.requests[l-1]
+		last := r.requests[l-1]
 		if last.index >= index {
 			return fmt.Errorf("appending %d/%d to %d/%d", term, index, last.term, last.index)
 		}
 	}
-	r.requests = append(r.requests, doingRequest{
-		index:  index,
-		term:   term,
-		result: resCh,
-	})
+	r.requests = append(r.requests, req)
+	msg.req = req
 
 	return nil
 }
 
-func (r *requestContextManager) Take(term, index uint64) (*applyResult, error) {
-	req, err := r.takeAndDrop(index)
-	if err != nil {
-		return nil, err
-	}
-
-	if req == nil {
-		return nil, nil
-	}
-
-	res, ok := <-req.result
-	if !ok {
-		return nil, nil
-	}
-
-	if req.term != term {
-		res.done <- &errTermChanged{
-			proposedTerm:  req.term,
-			committedTerm: term,
-		}
-		return nil, nil
-	}
-
-	return &res, nil
-}
-
-func (r *requestContextManager) takeAndDrop(index uint64) (*doingRequest, error) {
+func (r *requestContextManager) Take(term, index uint64) (*doingRequest, error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 	if len(r.requests) == 0 {
 		return nil, nil
 	}
 
-	req := &r.requests[0]
+	req := r.requests[0]
 	if req.index > index {
 		return nil, nil
 	}
@@ -151,6 +72,12 @@ func (r *requestContextManager) takeAndDrop(index uint64) (*doingRequest, error)
 	}
 
 	r.requests = r.requests[1:]
+
+	if req.term != term {
+		req.fire(&errTermChanged{curTerm: term})
+		return nil, nil
+	}
+
 	return req, nil
 }
 
@@ -162,32 +89,22 @@ func (r *requestContextManager) getFirstAndLast() (int, *doingRequest, *doingReq
 	case 0:
 		return 0, nil, nil
 	case 1:
-		return 1, &r.requests[0], nil
+		return 1, r.requests[0], nil
 	default:
-		return l, &r.requests[0], &r.requests[l-1]
+		return l, r.requests[0], r.requests[l-1]
 	}
 
 }
 
 func (r *requestContextManager) Clear(err error) {
-	requests := r.clear()
-	for _, req := range requests {
-		res, ok := <-req.result
-		if !ok {
-			continue
-		}
-		res.done <- err
-	}
-}
-
-func (r *requestContextManager) clear() []doingRequest {
 	r.lock.Lock()
-	defer r.lock.Unlock()
-
 	requests := r.requests
-	r.requests = []doingRequest{}
+	r.requests = nil
+	r.lock.Unlock()
 
-	return requests
+	for _, req := range requests {
+		req.fire(err)
+	}
 }
 
 func (r *requestContextManager) Describe(w io.Writer) {
@@ -205,31 +122,24 @@ func (r *requestContextManager) Describe(w io.Writer) {
 
 }
 
-type AsyncHandle = *asyncHandle
-type asyncHandle struct {
-	index uint64
-	resCh chan<- applyResult
+type doingRequest struct {
+	index  uint64
+	term   uint64
+	handle refs.ReqHandle
+
+	err  error
+	done chan struct{}
 }
 
-func (h *asyncHandle) Ignore() {
-	close(h.resCh)
+func (r *doingRequest) fire(err error) {
+	r.err = err
+	close(r.done)
 }
 
-func (h *asyncHandle) Wait(ctx context.Context) error {
+func (r *doingRequest) Done() <-chan struct{} {
+	return r.done
+}
 
-	defer h.Ignore()
-
-	done := make(chan error, 1)
-
-	select {
-	case h.resCh <- applyResult{
-		context: ctx,
-		done:    done,
-	}:
-		return <-done
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-
-	return nil
+func (r *doingRequest) Err() error {
+	return r.err
 }

@@ -384,7 +384,10 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 				rc.readIndexDoing.term != hardState.Term {
 				state := rc.readIndexDoing
 				rc.readIndexDoing = nil
-				state.err = errors.New("term changed")
+				state.err = &errTermChanged{
+					expTerm: state.term,
+					curTerm: hardState.Term,
+				}
 				close(state.done)
 				rc.raftLogger.Warning("read index term changed",
 					", id: ", strconv.FormatUint(state.id, 16),
@@ -633,17 +636,13 @@ func (rc *readyHandler) getSnapshot(w http.ResponseWriter, r *http.Request) {
 	w.Write(pb)
 }
 
-func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog) error {
+func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog, handle refs.ReqHandle) (DoingRequest, error) {
 
 	start := time.Now()
 
-	handle, err := rc.raft.Propose(ctx, oplog)
+	req, err := rc.raft.Propose(ctx, oplog, handle)
 	if err != nil {
-		return err
-	}
-
-	if err := handle.Wait(ctx); err != nil {
-		return err
+		return nil, err
 	}
 
 	proposeSeconds.Observe(time.Since(start).Seconds())
@@ -651,7 +650,7 @@ func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog) error {
 
 	proposePackBytes.Observe(float64(len(oplog.GetObjPack())))
 
-	return nil
+	return req, nil
 }
 
 func (rc *readyHandler) proposeReadIndex() *readIndexState {

@@ -95,7 +95,7 @@ func (s *SMSuite) TestApply() {
 		},
 	}
 
-	s.NoError(s.storage.OnApply(context.Background(), 2, 1, opAdd))
+	s.NoError(s.storage.OnApply(2, 1, opAdd, context.Background()))
 
 	refsMap := make(map[string]refs.Hash)
 	membersSlice := make([]*refs.Member, 3)
@@ -137,7 +137,7 @@ func (s *SMSuite) TestApply() {
 	s.EqualValues(len(sDecodeData.Members), 3)
 	s.EqualValues(sDecodeData.Refs["refs/heads/master"], refhashMaster)
 
-	s.NoError(s.storage.OnApply(context.Background(), 3, 2, opUpdateRemove))
+	s.NoError(s.storage.OnApply(3, 2, opUpdateRemove, context.Background()))
 
 	refsMap2 := make(map[string]refs.Hash)
 	var valBranchMaster2 []byte = []byte("1234567890abcdef1235")

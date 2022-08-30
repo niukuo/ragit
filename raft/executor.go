@@ -1,7 +1,6 @@
 package raft
 
 import (
-	"context"
 	"sync/atomic"
 
 	"github.com/golang/protobuf/proto"
@@ -130,22 +129,23 @@ func (e *executor) Run(stopC <-chan struct{}) error {
 }
 
 func (e *executor) applyEntry(entry *pb.Entry) (err error) {
-	ctx := context.Background()
-	res, err := e.raft.getContext(entry.Term, entry.Index)
+	req, err := e.raft.getContext(entry.Term, entry.Index)
 	if err != nil {
 		return err
 	}
 
-	if res != nil {
-		ctx = res.context
-		defer func() { res.done <- err }()
+	var handle refs.ReqHandle
+
+	if req != nil {
+		handle = req.handle
+		defer req.fire(err)
 	}
 
 	var oplog refs.Oplog
 	if err := proto.Unmarshal(entry.Data, &oplog); err != nil {
 		return err
 	}
-	if err := e.sm.OnApply(ctx, entry.Term, entry.Index, oplog); err != nil {
+	if err := e.sm.OnApply(entry.Term, entry.Index, oplog, handle); err != nil {
 		return err
 	}
 

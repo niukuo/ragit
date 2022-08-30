@@ -11,7 +11,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/niukuo/ragit/logging"
 	ragit "github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
@@ -610,14 +609,8 @@ func (s *storage) GetConfState() (*pb.ConfState, error) {
 	return &confState, nil
 }
 
-func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Oplog) error {
+func (s *storage) OnApply(term, index uint64, oplog refs.Oplog, handle refs.ReqHandle) error {
 	start := time.Now()
-
-	var buf bytes.Buffer
-	var out io.Writer = &buf
-	if v := ctx.Value(ragit.CtxWriterKey); v != nil {
-		out = io.MultiWriter(&buf, v.(io.Writer))
-	}
 
 	var errSkip = errors.New("check failed, skip")
 
@@ -642,12 +635,10 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 			oldTarget := op.GetOldTarget()
 			currentTarget := refsb.Get(name)
 			if !bytes.Equal(oldTarget, currentTarget) {
-				s.logger.Warningf("old target check failed for %s, expected: %x, actual: %x",
+				err := fmt.Errorf("old target check failed for %s, expected: %x, actual: %x",
 					name, oldTarget, currentTarget)
-				if out != nil {
-					refs.ReportReceivePackError(out, "fetch first")
-				}
-				return nil
+				s.logger.Warning(err)
+				return err
 			}
 			switch len(target) {
 			case 0:
@@ -672,23 +663,8 @@ func (s *storage) OnApply(ctx context.Context, term, index uint64, oplog refs.Op
 			}
 		}
 
-		if len(oplog.Ops) > 0 {
-			if err := s.listener.Apply(ctx, oplog, out); err != nil {
-				refs.ReportReceivePackError(out, err.Error())
-				return err
-			}
-
-			var status packp.ReportStatus
-			if err := status.Decode(bytes.NewReader(buf.Bytes())); err != nil {
-				s.logger.Warning("decode report status err: ", err,
-					", out: \n", buf.String())
-				return err
-			}
-
-			if err := status.Error(); err != nil {
-				s.logger.Warning("refs not updated, err: ", err)
-				return err
-			}
+		if err := s.listener.Apply(oplog, handle); err != nil {
+			return err
 		}
 
 		return nil
