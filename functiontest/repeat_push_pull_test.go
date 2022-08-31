@@ -58,7 +58,7 @@ func TestRepeatPushPull(t *testing.T) {
 		s.NoError(err)
 	}
 
-	closeRagit(dir, node, storage, *httpServer)
+	closeRagit(dir, node, storage, httpServer)
 }
 
 func startRagit(s *assert.Assertions, dir, localAddr, peerAddrs string) (raft.Node, bdb.Storage, *http.Server) {
@@ -139,7 +139,7 @@ func startRagit(s *assert.Assertions, dir, localAddr, peerAddrs string) (raft.No
 	return node, storage, httpServer
 }
 
-func closeRagit(dir string, node raft.Node, storage bdb.Storage, httpServer http.Server) {
+func closeRagit(dir string, node raft.Node, storage bdb.Storage, httpServer *http.Server) {
 	rc := node.(raft.ReadyHandler)
 	rc.Stop()
 	storage.Close()
