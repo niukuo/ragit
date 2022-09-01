@@ -32,10 +32,10 @@ func NewRequestContextManager() RequestContextManager {
 
 func (r *requestContextManager) Append(term, index uint64, msg *msgWithResult) error {
 	req := &doingRequest{
-		index:    index,
-		term:     term,
-		unlocker: msg.unlocker,
-		handle:   msg.handle,
+		index:  index,
+		term:   term,
+		doneCb: msg.doneCb,
+		handle: msg.handle,
 
 		done: make(chan struct{}),
 	}
@@ -124,10 +124,10 @@ func (r *requestContextManager) Describe(w io.Writer) {
 }
 
 type doingRequest struct {
-	index    uint64
-	term     uint64
-	unlocker Unlocker
-	handle   refs.ReqHandle
+	index  uint64
+	term   uint64
+	doneCb ReqDoneCallback
+	handle refs.ReqHandle
 
 	err  error
 	done chan struct{}
@@ -135,8 +135,8 @@ type doingRequest struct {
 
 func (r *doingRequest) fire(err error) {
 	r.err = err
-	if r.unlocker != nil {
-		r.unlocker()
+	if r.doneCb != nil {
+		r.doneCb(err)
 	}
 	close(r.done)
 }

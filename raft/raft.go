@@ -26,8 +26,8 @@ var ErrStopped = errors.New("stopped")
 type msgWithResult struct {
 	expectedTerm uint64
 	data         []byte
-	unlocker     Unlocker
 	handle       refs.ReqHandle
+	doneCb       ReqDoneCallback
 
 	err      error
 	req      *doingRequest
@@ -370,8 +370,8 @@ func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, handle refs.R
 		msg.expectedTerm = v.(uint64)
 	}
 
-	if fn := ctx.Value(CtxReqUnlocker); fn != nil {
-		msg.unlocker = fn.(Unlocker)
+	if fn := ctx.Value(CtxReqDoneCallback); fn != nil {
+		msg.doneCb = fn.(ReqDoneCallback)
 	}
 
 	select {

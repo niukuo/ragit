@@ -2,8 +2,9 @@ package raft
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"sort"
+	"sync/atomic"
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
@@ -12,37 +13,48 @@ import (
 )
 
 type Tx struct {
-	rc Raft
+	rc     Raft
+	term   uint64
+	global bool
 
-	term     uint64
+	refCnt   int32
 	unlocker Unlocker
 
-	global bool
-	cmds   map[plumbing.ReferenceName]*packp.Command
+	doing int32
+
+	cmds map[plumbing.ReferenceName]*packp.Command
 }
 
-func (t *Tx) Get(refName plumbing.ReferenceName) plumbing.Hash {
-	if cmd, ok := t.cmds[refName]; ok {
-		return cmd.New
+func newTx(
+	rc Raft,
+	term uint64,
+	global bool,
+	unlocker Unlocker,
+	cmds map[plumbing.ReferenceName]*packp.Command,
+) *Tx {
+	return &Tx{
+		rc:     rc,
+		term:   term,
+		global: global,
+
+		refCnt:   1,
+		unlocker: unlocker,
+
+		cmds: cmds,
 	}
-	return plumbing.Hash{}
 }
 
-func (t *Tx) Set(refName plumbing.ReferenceName, hash plumbing.Hash) error {
-
+func (t *Tx) Get(refName plumbing.ReferenceName) *plumbing.Hash {
 	if cmd, ok := t.cmds[refName]; ok {
-		cmd.New = hash
-		return nil
+		return &cmd.New
 	} else if t.global {
-		t.cmds[refName] = &packp.Command{
+		cmd := &packp.Command{
 			Name: refName,
-			New:  hash,
 		}
-		return nil
-	} else {
-		return fmt.Errorf("ref %s not locked", refName)
+		t.cmds[refName] = cmd
+		return &cmd.New
 	}
-
+	return nil
 }
 
 func (t *Tx) Commit(ctx context.Context, pack []byte, handle refs.ReqHandle) (DoingRequest, error) {
@@ -80,21 +92,49 @@ func (t *Tx) Commit(ctx context.Context, pack []byte, handle refs.ReqHandle) (Do
 	}
 
 	ctx = WithExpectedTerm(ctx, t.term)
-	ctx = WithUnlocker(ctx, t.unlocker)
+	ctx = WithReqDoneCallback(ctx, t.done)
 
+	if old := atomic.SwapInt32(&t.doing, 1); old != 0 {
+		return nil, errors.New("already doing")
+	}
+	if v := atomic.AddInt32(&t.refCnt, 1); v <= 0 {
+		panic(v)
+	}
 	req, err := t.rc.Propose(ctx, oplog, handle)
 	if err != nil {
+		t.done(err)
 		return nil, err
 	}
-	t.unlocker = nil
-	t.cmds = nil
-	t.global = false
 
 	return req, nil
 }
 
-func (t *Tx) Close() {
-	if t.unlocker != nil {
-		t.unlocker()
+func (t *Tx) done(err error) {
+	if old := atomic.SwapInt32(&t.doing, 0); old == 0 {
+		panic(err)
 	}
+	if err == nil {
+		for _, cmd := range t.cmds {
+			cmd.Old = cmd.New
+		}
+	}
+	t.release()
+}
+
+func (t *Tx) release() {
+	if v := atomic.AddInt32(&t.refCnt, -1); v == 0 {
+		unlocker := t.unlocker
+		defer unlocker()
+		t.cmds = nil
+		t.unlocker = nil
+		t.rc = nil
+		t.term = 0
+		t.global = false
+	} else if v < 0 {
+		panic(v)
+	}
+}
+
+func (t *Tx) Close() {
+	t.release()
 }

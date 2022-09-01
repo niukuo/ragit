@@ -202,7 +202,7 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		refNames = append(refNames, cmd.Name)
 	}
 
-	tx, err := h.node.BeginTx(r.Context(), refNames...)
+	tx, err := h.node.BeginTx(r.Context(), refNames[0], refNames[1:]...)
 	if err != nil {
 		h.logger.Warning("begin tx failed, err: ", err)
 		refs.ReportReceivePackError(w, err.Error())
@@ -211,11 +211,12 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 	defer tx.Close()
 
 	for _, cmd := range req.Commands {
-		if hash := tx.Get(cmd.Name); hash != cmd.Old {
+		if hash := tx.Get(cmd.Name); *hash != cmd.Old {
 			refs.ReportReceivePackError(w, "fetch first")
 			return
+		} else {
+			*hash = cmd.New
 		}
-		tx.Set(cmd.Name, cmd.New)
 	}
 
 	content, err := ioutil.ReadAll(req.Packfile)

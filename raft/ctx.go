@@ -12,10 +12,12 @@ func WithExpectedTerm(ctx context.Context, term uint64) context.Context {
 	return context.WithValue(ctx, CtxExpectedTermKey, term)
 }
 
-type ctxReqUnlocker struct{}
+type ctxReqDoneCallback struct{}
 
-var CtxReqUnlocker = ctxReqUnlocker{}
+var CtxReqDoneCallback = ctxReqDoneCallback{}
 
-func WithUnlocker(ctx context.Context, unlocker Unlocker) context.Context {
-	return context.WithValue(ctx, CtxReqUnlocker, unlocker)
+type ReqDoneCallback func(err error)
+
+func WithReqDoneCallback(ctx context.Context, cb ReqDoneCallback) context.Context {
+	return context.WithValue(ctx, CtxReqDoneCallback, cb)
 }

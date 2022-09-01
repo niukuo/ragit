@@ -49,7 +49,7 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tx, err := h.node.BeginTx(r.Context())
+		tx, err := h.node.BeginGlobalTx(r.Context(), nil)
 		if err != nil {
 			log.Printf("begin tx failed, err: %s", err)
 			http.Error(w, "begin tx failed: "+err.Error(), http.StatusServiceUnavailable)
@@ -77,21 +77,16 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if hash := tx.Get(plumbing.ReferenceName(refName)); !bytes.Equal(hash[:], oldTarget) {
 				http.Error(w, "not match: "+refName, http.StatusBadRequest)
 				return
-			}
-
-			target, err := hex.DecodeString(slices[1])
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			} else if l := len(target); l != len(plumbing.Hash{}) {
-				http.Error(w, "invalid target: "+refName, http.StatusBadRequest)
-				return
 			} else {
-				var hash plumbing.Hash
-				copy(hash[:], target)
-				if err := tx.Set(plumbing.ReferenceName(refName), hash); err != nil {
-					http.Error(w, "set hash failed: "+err.Error(), http.StatusBadRequest)
+				target, err := hex.DecodeString(slices[1])
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
+				} else if l := len(target); l != len(plumbing.Hash{}) {
+					http.Error(w, "invalid target: "+refName, http.StatusBadRequest)
+					return
+				} else {
+					copy(hash[:], target)
 				}
 			}
 

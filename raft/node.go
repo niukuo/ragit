@@ -14,6 +14,10 @@ type Node interface {
 	GetStatus(ctx context.Context) (*Status, error)
 	ReadIndex(ctx context.Context) (uint64, error)
 	BeginTx(ctx context.Context,
+		refName plumbing.ReferenceName,
 		refNames ...plumbing.ReferenceName,
+	) (*Tx, error)
+	BeginGlobalTx(ctx context.Context,
+		lockErr error,
 	) (*Tx, error)
 }
