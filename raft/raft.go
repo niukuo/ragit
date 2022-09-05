@@ -77,7 +77,8 @@ type ConfChangeParams struct {
 	PeerUrls []string `json:"peerUrls"`
 }
 
-func NewRaft(config Config) Raft {
+func NewRaft(config Config,
+	opts ...NodeOptions) Raft {
 	raftLogger := logging.GetLogger("raft")
 	eventLogger := logging.GetLogger("event")
 	rc := &raftNode{
@@ -88,10 +89,18 @@ func NewRaft(config Config) Raft {
 
 		requests: NewRequestContextManager(),
 
-		newMemberID: config.NewMemberID,
+		newMemberID: func(addr []string) refs.PeerID {
+			now := time.Now()
+			memberID := refs.ComputePeerID(addr, &now)
+			return memberID
+		},
 
 		raftLogger:  raftLogger,
 		eventLogger: eventLogger,
+	}
+
+	for _, opt := range opts {
+		opt.applyRaft(rc)
 	}
 
 	return rc

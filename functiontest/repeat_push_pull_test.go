@@ -103,11 +103,6 @@ func startRagit(s *assert.Assertions, dir, localAddr, peerAddrs string) (raft.No
 	}
 	c.Storage = storage
 	c.StateMachine = storage
-	c.NewMemberID = func(addr []string) refs.PeerID {
-		now := time.Now()
-		memberID := refs.ComputePeerID(addr, &now)
-		return memberID
-	}
 	c.LocalAddrs = []string{localAddr}
 	node, err := raft.RunNode(c)
 	s.NoError(err)

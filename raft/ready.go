@@ -79,7 +79,9 @@ type readyHandler struct {
 	eventLogger logging.Logger
 }
 
-func RunNode(c Config) (Node, error) {
+func RunNode(c Config,
+	opts ...NodeOptions,
+) (Node, error) {
 
 	id := PeerID(c.ID)
 
@@ -96,15 +98,11 @@ func RunNode(c Config) (Node, error) {
 		return nil, err
 	}
 
-	if c.NewMemberID == nil {
-		return nil, errors.New("NewMemberID is nil")
-	}
-
 	if len(c.LocalAddrs) == 0 {
 		return nil, errors.New("LocalAddrs is empty")
 	}
 
-	r := NewRaft(c)
+	r := NewRaft(c, opts...)
 
 	sm := c.StateMachine
 
@@ -153,6 +151,10 @@ func RunNode(c Config) (Node, error) {
 
 		raftLogger:  logging.GetLogger("ready"),
 		eventLogger: logging.GetLogger("event.ready"),
+	}
+
+	for _, opt := range opts {
+		opt.applyReadyHandler(rc)
 	}
 
 	rc.raftLogger.Info("starting raft instance, applied_index: ", state.AppliedIndex,

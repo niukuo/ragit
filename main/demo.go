@@ -8,7 +8,6 @@ import (
 	_ "net/http/pprof"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/niukuo/ragit/api"
 	"github.com/niukuo/ragit/bdb"
@@ -106,10 +105,4 @@ func getLocalID() (refs.PeerID, error) {
 	localID := refs.ComputePeerID([]string{*LocalAddr}, nil)
 
 	return localID, nil
-}
-
-func NewMemberID(addr []string) refs.PeerID {
-	now := time.Now()
-	memberID := refs.ComputePeerID(addr, &now)
-	return memberID
 }
