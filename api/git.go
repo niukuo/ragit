@@ -203,7 +203,7 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tx, err := h.node.BeginTx(func(txnLocker raft.MapLocker, storage raft.Storage) (
-		map[plumbing.ReferenceName]plumbing.Hash, raft.Unlocker, error) {
+		map[plumbing.ReferenceName]plumbing.Hash, bool, raft.Unlocker, error) {
 		return raft.LockRefList(r.Context(), txnLocker, storage, refNames[0], refNames[1:]...)
 	})
 	if err != nil {

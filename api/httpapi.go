@@ -49,7 +49,7 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tx, err := h.node.BeginTx(func(txnLocker raft.MapLocker, storage raft.Storage) (map[plumbing.ReferenceName]plumbing.Hash, raft.Unlocker, error) {
+		tx, err := h.node.BeginTx(func(txnLocker raft.MapLocker, storage raft.Storage) (map[plumbing.ReferenceName]plumbing.Hash, bool, raft.Unlocker, error) {
 			return raft.LockGlobal(r.Context(), txnLocker, nil, storage)
 		})
 		if err != nil {

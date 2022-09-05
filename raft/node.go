@@ -12,6 +12,7 @@ type TxIniter func(
 	storage Storage,
 ) (
 	map[plumbing.ReferenceName]plumbing.Hash,
+	bool,
 	Unlocker,
 	error,
 )

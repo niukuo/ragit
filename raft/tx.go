@@ -21,12 +21,14 @@ type Tx struct {
 
 	doing int32
 
-	cmds map[plumbing.ReferenceName]*packp.Command
+	cmds   map[plumbing.ReferenceName]*packp.Command
+	insert bool
 }
 
 func newTx(
 	rc Raft,
 	term uint64,
+	insert bool,
 	unlocker Unlocker,
 	cmds map[plumbing.ReferenceName]*packp.Command,
 ) *Tx {
@@ -37,7 +39,8 @@ func newTx(
 		refCnt:   1,
 		unlocker: unlocker,
 
-		cmds: cmds,
+		cmds:   cmds,
+		insert: insert,
 	}
 }
 
@@ -48,7 +51,27 @@ func (t *Tx) Get(refName plumbing.ReferenceName) *plumbing.Hash {
 	return nil
 }
 
-func (t *Tx) Commit(ctx context.Context, pack []byte, handle refs.ReqHandle) (DoingRequest, error) {
+func (t *Tx) Set(refName plumbing.ReferenceName, hash plumbing.Hash) bool {
+
+	if cmd, ok := t.cmds[refName]; ok {
+		cmd.New = hash
+		return true
+	} else if t.insert {
+		cmd = &packp.Command{
+			Name: refName,
+			Old:  hash,
+			New:  hash,
+		}
+		t.cmds[refName] = cmd
+		return true
+	} else {
+		return false
+	}
+}
+
+func (t *Tx) getOps() ([]*refs.Oplog_Op, bool) {
+
+	needPack := false
 
 	ops := make([]*refs.Oplog_Op, 0, len(t.cmds))
 
@@ -63,6 +86,7 @@ func (t *Tx) Commit(ctx context.Context, pack []byte, handle refs.ReqHandle) (Do
 		if !cmd.New.IsZero() {
 			hash := cmd.New
 			toHash = hash[:]
+			needPack = true
 		}
 
 		ops = append(ops, &refs.Oplog_Op{
@@ -77,17 +101,37 @@ func (t *Tx) Commit(ctx context.Context, pack []byte, handle refs.ReqHandle) (Do
 		return *ops[i].Name < *ops[j].Name
 	})
 
+	return ops, needPack
+}
+
+func (t *Tx) Commit(ctx context.Context, pack []byte, handle refs.ReqHandle) (DoingRequest, error) {
+
+	ops, needPack := t.getOps()
 	oplog := refs.Oplog{
-		Ops:     ops,
-		ObjPack: pack,
+		Ops: ops,
 	}
 
-	ctx = WithExpectedTerm(ctx, t.term)
+	if needPack {
+		oplog.ObjPack = pack
+	}
+
+	req, err := t.commit(ctx, oplog, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+func (t *Tx) commit(ctx context.Context, oplog refs.Oplog, handle refs.ReqHandle) (DoingRequest, error) {
+
 	ctx = WithReqDoneCallback(ctx, t.done)
+	ctx = WithExpectedTerm(ctx, t.term)
 
 	if old := atomic.SwapInt32(&t.doing, 1); old != 0 {
 		return nil, errors.New("already doing")
 	}
+
 	if v := atomic.AddInt32(&t.refCnt, 1); v <= 0 {
 		panic(v)
 	}

@@ -649,7 +649,7 @@ func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog, handle re
 
 	start := time.Now()
 
-	tx, err := rc.BeginTx(func(txnLocker MapLocker, storage Storage) (map[plumbing.ReferenceName]plumbing.Hash, Unlocker, error) {
+	tx, err := rc.BeginTx(func(txnLocker MapLocker, storage Storage) (map[plumbing.ReferenceName]plumbing.Hash, bool, Unlocker, error) {
 		return LockGlobal(ctx, txnLocker, nil, rc.storage)
 	})
 	if err != nil {
@@ -743,7 +743,7 @@ func (rc *readyHandler) BeginTx(initer TxIniter) (*Tx, error) {
 		return nil, errors.New("not leader")
 	}
 
-	refsMap, unlocker, err := initer(rc.txnLocker, rc.storage)
+	refsMap, insert, unlocker, err := initer(rc.txnLocker, rc.storage)
 	if err != nil {
 		return nil, err
 	}
@@ -773,7 +773,7 @@ func (rc *readyHandler) BeginTx(initer TxIniter) (*Tx, error) {
 		}
 	}
 
-	stx := newTx(rc.raft, term, unlocker, cmdMap)
+	stx := newTx(rc.raft, term, insert, unlocker, cmdMap)
 	unlocker = nil
 
 	return stx, nil
@@ -785,16 +785,17 @@ func LockGlobal(
 	lockErr error,
 	storage Storage) (
 	map[plumbing.ReferenceName]plumbing.Hash,
+	bool,
 	Unlocker,
 	error) {
 
 	if lockErr != nil {
 		if err := txnLocker.LockGlobalWithError(ctx, lockErr); err != nil {
-			return nil, nil, err
+			return nil, false, nil, err
 		}
 	} else {
 		if err := txnLocker.LockGlobal(ctx); err != nil {
-			return nil, nil, err
+			return nil, false, nil, err
 		}
 	}
 
@@ -807,7 +808,7 @@ func LockGlobal(
 
 	allRefs, err := storage.GetAllRefs()
 	if err != nil {
-		return nil, nil, err
+		return nil, false, nil, err
 	}
 
 	cmds := map[plumbing.ReferenceName]plumbing.Hash{}
@@ -820,7 +821,7 @@ func LockGlobal(
 	u := unlocker
 	unlocker = nil
 
-	return cmds, u, nil
+	return cmds, true, u, nil
 }
 
 func LockRefList(
@@ -829,12 +830,13 @@ func LockRefList(
 	storage Storage,
 	refName plumbing.ReferenceName, refNames ...plumbing.ReferenceName) (
 	map[plumbing.ReferenceName]plumbing.Hash,
+	bool,
 	Unlocker,
 	error) {
 
 	unlocker, err := txnLocker.Lock(ctx, refName)
 	if err != nil {
-		return nil, nil, err
+		return nil, false, nil, err
 	}
 	defer func() {
 		if unlocker != nil {
@@ -846,7 +848,7 @@ func LockRefList(
 		u, err := txnLocker.Lock(ctx, refName)
 		if err != nil {
 			unlocker()
-			return nil, nil, fmt.Errorf("lock ref %s failed, err: %w", refName, err)
+			return nil, false, nil, fmt.Errorf("lock ref %s failed, err: %w", refName, err)
 		}
 		u2 := unlocker
 		unlocker = func() {
@@ -857,7 +859,7 @@ func LockRefList(
 
 	allRefs, err := storage.GetAllRefs()
 	if err != nil {
-		return nil, nil, err
+		return nil, false, nil, err
 	}
 
 	cmds := map[plumbing.ReferenceName]plumbing.Hash{
@@ -871,5 +873,5 @@ func LockRefList(
 	u := unlocker
 	unlocker = nil
 
-	return cmds, u, nil
+	return cmds, false, u, nil
 }
