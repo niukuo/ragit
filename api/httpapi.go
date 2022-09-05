@@ -49,7 +49,9 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tx, err := h.node.BeginGlobalTx(r.Context(), nil)
+		tx, err := h.node.BeginTx(func(txnLocker raft.MapLocker, storage raft.Storage) (map[plumbing.ReferenceName]plumbing.Hash, raft.Unlocker, error) {
+			return raft.LockGlobal(r.Context(), txnLocker, nil, storage)
+		})
 		if err != nil {
 			log.Printf("begin tx failed, err: %s", err)
 			http.Error(w, "begin tx failed: "+err.Error(), http.StatusServiceUnavailable)

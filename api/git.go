@@ -202,7 +202,10 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		refNames = append(refNames, cmd.Name)
 	}
 
-	tx, err := h.node.BeginTx(r.Context(), refNames[0], refNames[1:]...)
+	tx, err := h.node.BeginTx(func(txnLocker raft.MapLocker, storage raft.Storage) (
+		map[plumbing.ReferenceName]plumbing.Hash, raft.Unlocker, error) {
+		return raft.LockRefList(r.Context(), txnLocker, storage, refNames[0], refNames[1:]...)
+	})
 	if err != nil {
 		h.logger.Warning("begin tx failed, err: ", err)
 		refs.ReportReceivePackError(w, err.Error())

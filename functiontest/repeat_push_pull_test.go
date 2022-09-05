@@ -44,18 +44,18 @@ func TestRepeatPushPull(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		pushCmdStr := "cd test/pushPath; echo a >> a.txt; git add a.txt; git commit -m a; git push origin HEAD -f"
 		runCmd := exec.Command("/bin/bash", "-c", pushCmdStr)
-		err = runCmd.Run()
-		s.NoError(err)
+		stdout, err := runCmd.CombinedOutput()
+		s.NoError(err, string(stdout))
 
 		pullCmdStr := "cd test/pullPath; git pull origin master -f"
 		runCmd = exec.Command("/bin/bash", "-c", pullCmdStr)
-		err = runCmd.Run()
-		s.NoError(err)
+		stdout, err = runCmd.CombinedOutput()
+		s.NoError(err, string(stdout))
 
 		diffCmdStr := "diff test/pullPath/a.txt test/pushPath/a.txt"
 		runCmd = exec.Command("/bin/bash", "-c", diffCmdStr)
-		err = runCmd.Run()
-		s.NoError(err)
+		stdout, err = runCmd.CombinedOutput()
+		s.NoError(err, string(stdout))
 	}
 
 	closeRagit(dir, node, storage, httpServer)

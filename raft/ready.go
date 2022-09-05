@@ -649,7 +649,9 @@ func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog, handle re
 
 	start := time.Now()
 
-	tx, err := rc.BeginGlobalTx(ctx, nil)
+	tx, err := rc.BeginTx(func(txnLocker MapLocker, storage Storage) (map[plumbing.ReferenceName]plumbing.Hash, Unlocker, error) {
+		return LockGlobal(ctx, txnLocker, nil, rc.storage)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -734,41 +736,22 @@ func (rc *readyHandler) GetStatus(ctx context.Context) (*Status, error) {
 	return &status, nil
 }
 
-// start a new tx.
-// if refNames is empty, a global lock will hold
-func (rc *readyHandler) BeginTx(ctx context.Context,
-	refName plumbing.ReferenceName,
-	refNames ...plumbing.ReferenceName,
-) (*Tx, error) {
+func (rc *readyHandler) BeginTx(initer TxIniter) (*Tx, error) {
 
 	term := rc.storage.GetLeaderTerm()
 	if term == 0 {
 		return nil, errors.New("not leader")
 	}
 
-	unlocker, err := rc.txnLocker.Lock(ctx, refName)
+	refsMap, unlocker, err := initer(rc.txnLocker, rc.storage)
 	if err != nil {
 		return nil, err
 	}
-
 	defer func() {
 		if unlocker != nil {
 			unlocker()
 		}
 	}()
-
-	for _, refName := range refNames {
-		u, err := rc.txnLocker.Lock(ctx, refName)
-		if err != nil {
-			unlocker()
-			return nil, fmt.Errorf("lock ref %s failed, err: %w", refName, err)
-		}
-		u2 := unlocker
-		unlocker = Unlocker(func() {
-			u()
-			u2()
-		})
-	}
 
 	if t := rc.storage.GetLeaderTerm(); t == 0 {
 		return nil, fmt.Errorf("leader lost after lock, term: %d", term)
@@ -780,88 +763,112 @@ func (rc *readyHandler) BeginTx(ctx context.Context,
 		term = t
 	}
 
-	cmds := make(map[plumbing.ReferenceName]*packp.Command)
-
-	allRefs, err := rc.storage.GetAllRefs()
-	if err != nil {
-		return nil, err
-	}
-
-	hash := plumbing.Hash(allRefs[string(refName)])
-	cmds[refName] = &packp.Command{
-		Name: refName,
-		Old:  hash,
-		New:  hash,
-	}
-	for _, refName := range refNames {
-		hash := plumbing.Hash(allRefs[string(refName)])
-		cmds[refName] = &packp.Command{
+	cmdMap := make(map[plumbing.ReferenceName]*packp.Command)
+	for refName, hash := range refsMap {
+		cmdMap[refName] = &packp.Command{
 			Name: refName,
 			Old:  hash,
 			New:  hash,
 		}
 	}
 
-	stx := newTx(rc.raft, term, false, unlocker, cmds)
+	stx := newTx(rc.raft, term, unlocker, cmdMap)
 	unlocker = nil
 
 	return stx, nil
 }
 
-func (rc *readyHandler) BeginGlobalTx(ctx context.Context,
+func LockGlobal(
+	ctx context.Context,
+	txnLocker MapLocker,
 	lockErr error,
-) (*Tx, error) {
+	storage Storage) (
+	map[plumbing.ReferenceName]plumbing.Hash,
+	Unlocker,
+	error) {
 
-	term := rc.storage.GetLeaderTerm()
-	if term == 0 {
-		return nil, errors.New("not leader")
-	}
-
-	var unlocker Unlocker
 	if lockErr != nil {
-		if err := rc.txnLocker.LockGlobalWithError(ctx, lockErr); err != nil {
-			return nil, err
+		if err := txnLocker.LockGlobalWithError(ctx, lockErr); err != nil {
+			return nil, nil, err
 		}
 	} else {
-		if err := rc.txnLocker.LockGlobal(ctx); err != nil {
-			return nil, err
+		if err := txnLocker.LockGlobal(ctx); err != nil {
+			return nil, nil, err
 		}
 	}
-	unlocker = rc.txnLocker.UnlockGlobal
+
+	unlocker := txnLocker.UnlockGlobal
 	defer func() {
 		if unlocker != nil {
 			unlocker()
 		}
 	}()
 
-	if t := rc.storage.GetLeaderTerm(); t == 0 {
-		return nil, fmt.Errorf("leader lost after lock, term: %d", term)
-	} else if t != term {
-		rc.raftLogger.Warning("term changed",
-			", before: ", term,
-			", now: ", t,
-		)
-		term = t
-	}
-
-	cmds := make(map[plumbing.ReferenceName]*packp.Command)
-
-	allRefs, err := rc.storage.GetAllRefs()
+	allRefs, err := storage.GetAllRefs()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	cmds := map[plumbing.ReferenceName]plumbing.Hash{}
 
 	for refName, hash := range allRefs {
 		refName := plumbing.ReferenceName(refName)
-		cmds[refName] = &packp.Command{
-			Name: refName,
-			Old:  plumbing.Hash(hash),
-			New:  plumbing.Hash(hash),
+		cmds[plumbing.ReferenceName(refName)] = plumbing.Hash(hash)
+	}
+
+	u := unlocker
+	unlocker = nil
+
+	return cmds, u, nil
+}
+
+func LockRefList(
+	ctx context.Context,
+	txnLocker MapLocker,
+	storage Storage,
+	refName plumbing.ReferenceName, refNames ...plumbing.ReferenceName) (
+	map[plumbing.ReferenceName]plumbing.Hash,
+	Unlocker,
+	error) {
+
+	unlocker, err := txnLocker.Lock(ctx, refName)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if unlocker != nil {
+			unlocker()
+		}
+	}()
+
+	for _, refName := range refNames {
+		u, err := txnLocker.Lock(ctx, refName)
+		if err != nil {
+			unlocker()
+			return nil, nil, fmt.Errorf("lock ref %s failed, err: %w", refName, err)
+		}
+		u2 := unlocker
+		unlocker = func() {
+			u()
+			u2()
 		}
 	}
 
-	stx := newTx(rc.raft, term, true, unlocker, cmds)
+	allRefs, err := storage.GetAllRefs()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cmds := map[plumbing.ReferenceName]plumbing.Hash{
+		refName: plumbing.Hash(allRefs[string(refName)]),
+	}
+
+	for _, refName := range refNames {
+		cmds[refName] = plumbing.Hash(allRefs[string(refName)])
+	}
+
+	u := unlocker
 	unlocker = nil
 
-	return stx, nil
+	return cmds, u, nil
 }

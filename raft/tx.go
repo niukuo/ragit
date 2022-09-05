@@ -13,9 +13,8 @@ import (
 )
 
 type Tx struct {
-	rc     Raft
-	term   uint64
-	global bool
+	rc   Raft
+	term uint64
 
 	refCnt   int32
 	unlocker Unlocker
@@ -28,14 +27,12 @@ type Tx struct {
 func newTx(
 	rc Raft,
 	term uint64,
-	global bool,
 	unlocker Unlocker,
 	cmds map[plumbing.ReferenceName]*packp.Command,
 ) *Tx {
 	return &Tx{
-		rc:     rc,
-		term:   term,
-		global: global,
+		rc:   rc,
+		term: term,
 
 		refCnt:   1,
 		unlocker: unlocker,
@@ -46,12 +43,6 @@ func newTx(
 
 func (t *Tx) Get(refName plumbing.ReferenceName) *plumbing.Hash {
 	if cmd, ok := t.cmds[refName]; ok {
-		return &cmd.New
-	} else if t.global {
-		cmd := &packp.Command{
-			Name: refName,
-		}
-		t.cmds[refName] = cmd
 		return &cmd.New
 	}
 	return nil
@@ -123,13 +114,14 @@ func (t *Tx) done(err error) {
 
 func (t *Tx) release() {
 	if v := atomic.AddInt32(&t.refCnt, -1); v == 0 {
-		unlocker := t.unlocker
-		defer unlocker()
+		if t.unlocker != nil {
+			unlocker := t.unlocker
+			defer unlocker()
+		}
 		t.cmds = nil
 		t.unlocker = nil
 		t.rc = nil
 		t.term = 0
-		t.global = false
 	} else if v < 0 {
 		panic(v)
 	}

@@ -933,12 +933,15 @@ func (s *storage) OnLeaderStart(term uint64) {
 	if t := atomic.SwapUint64(&s.leaderTerm, term); t != 0 {
 		panic(fmt.Errorf("OnLeaderStart called with leaderTerm == %d", t))
 	}
+	s.logger.Info("on_leader_start, term: ", term)
 	s.listener.OnLeaderStart(term)
 }
 
 func (s *storage) OnLeaderStop() {
 	if curLeaderTerm := atomic.SwapUint64(&s.leaderTerm, 0); curLeaderTerm == 0 {
 		panic(errors.New("OnLeaderStop called with leaderTerm == 0"))
+	} else {
+		s.logger.Warning("on_leader_stop, term: ", curLeaderTerm)
 	}
 	s.listener.OnLeaderStop()
 }
