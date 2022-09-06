@@ -59,7 +59,6 @@ func (t *Tx) Set(refName plumbing.ReferenceName, hash plumbing.Hash) bool {
 	} else if t.insert {
 		cmd = &packp.Command{
 			Name: refName,
-			Old:  hash,
 			New:  hash,
 		}
 		t.cmds[refName] = cmd
