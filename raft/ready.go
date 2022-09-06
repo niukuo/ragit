@@ -756,11 +756,12 @@ func (rc *readyHandler) BeginTx(initer TxIniter) (*Tx, error) {
 	if t := rc.storage.GetLeaderTerm(); t == 0 {
 		return nil, fmt.Errorf("leader lost after lock, term: %d", term)
 	} else if t != term {
+		// storage may updated during leader change
 		rc.raftLogger.Warning("term changed",
 			", before: ", term,
 			", now: ", t,
 		)
-		term = t
+		return nil, fmt.Errorf("term changed from %d to %d, need retry", term, t)
 	}
 
 	cmdMap := make(map[plumbing.ReferenceName]*packp.Command)
