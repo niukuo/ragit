@@ -703,7 +703,8 @@ func (rc *readyHandler) Propose(ctx context.Context, cmds []*packp.Command, pack
 	}
 
 	ctx = WithExpectedTerm(ctx, term)
-	ctx = WithReqDoneCallback(ctx, func(err error) { unlocker() })
+	u := unlocker
+	ctx = WithReqDoneCallback(ctx, func(err error) { u() })
 
 	req, err := rc.raft.Propose(ctx, cmds, pack, handle)
 	if err != nil {
