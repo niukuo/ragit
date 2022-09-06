@@ -1,13 +1,13 @@
 package raft
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -645,50 +645,76 @@ func (rc *readyHandler) getSnapshot(w http.ResponseWriter, r *http.Request) {
 	w.Write(pb)
 }
 
-func (rc *readyHandler) Propose(ctx context.Context, oplog refs.Oplog, handle refs.ReqHandle) (DoingRequest, error) {
+func (rc *readyHandler) Propose(ctx context.Context, cmds []*packp.Command, pack []byte, handle refs.ReqHandle) (DoingRequest, error) {
 
 	start := time.Now()
 
-	tx, err := rc.BeginTx(func(txnLocker MapLocker, storage Storage) (map[plumbing.ReferenceName]plumbing.Hash, bool, Unlocker, error) {
-		return LockGlobal(ctx, txnLocker, nil, rc.storage)
+	term := rc.storage.GetLeaderTerm()
+	if term == 0 {
+		return nil, errors.New("not leader")
+	}
+
+	// make a sorted copy
+	sortedCmds := append(make([]*packp.Command, 0, len(cmds)), cmds...)
+	sort.Slice(sortedCmds, func(i, j int) bool {
+		return sortedCmds[i].Name < sortedCmds[j].Name
 	})
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Close()
 
-	for _, op := range oplog.Ops {
-		refName := plumbing.ReferenceName(op.GetName())
-		hash := tx.Get(refName)
-		switch l := len(op.OldTarget); l {
-		case 0:
-			if !hash.IsZero() {
-				return nil, fmt.Errorf("ref %s already exist: %s", refName, hash)
-			}
-		default:
-			if hash.IsZero() || !bytes.Equal(hash[:], op.OldTarget) {
-				return nil, fmt.Errorf("ref %s not match", refName)
-			}
+	unlocker := func() {}
+	defer func() {
+		if unlocker != nil {
+			unlocker()
 		}
-		switch l := len(op.Target); l {
-		case 0:
-			*hash = plumbing.Hash{}
-		case len(hash):
-			copy(hash[:], op.Target)
-		default:
-			return nil, fmt.Errorf("invalid target for %s: %x", refName, op.Target)
+	}()
+
+	for _, cmd := range sortedCmds {
+		u, err := rc.txnLocker.Lock(ctx, cmd.Name)
+		if err != nil {
+			return nil, fmt.Errorf("lock ref %s failed, err: %w", cmd.Name, err)
+		}
+		u2 := unlocker
+		unlocker = func() {
+			u()
+			u2()
 		}
 	}
 
-	req, err := tx.Commit(ctx, oplog.ObjPack, handle)
+	allRefs, err := rc.storage.GetAllRefs()
 	if err != nil {
 		return nil, err
 	}
+
+	for _, cmd := range cmds {
+		if hash := allRefs[string(cmd.Name)]; hash != refs.Hash(cmd.Old) {
+			return nil, fmt.Errorf("ref not match, %s expect: %s, actual: %s",
+				cmd.Name, cmd.Old, hash)
+		}
+	}
+
+	if t := rc.storage.GetLeaderTerm(); t == 0 {
+		return nil, fmt.Errorf("leader lost after lock, term: %d", term)
+	} else if t != term {
+		// storage may updated during leader change
+		rc.raftLogger.Warning("term changed",
+			", before: ", term,
+			", now: ", t,
+		)
+		return nil, fmt.Errorf("term changed from %d to %d, need retry", term, t)
+	}
+
+	ctx = WithExpectedTerm(ctx, term)
+	ctx = WithReqDoneCallback(ctx, func(err error) { unlocker() })
+
+	req, err := rc.raft.Propose(ctx, cmds, pack, handle)
+	if err != nil {
+		return nil, err
+	}
+	unlocker = nil
 
 	proposeSeconds.Observe(time.Since(start).Seconds())
 	proposeCounter.Inc()
 
-	proposePackBytes.Observe(float64(len(oplog.GetObjPack())))
+	proposePackBytes.Observe(float64(len(pack)))
 
 	return req, nil
 }

@@ -3,12 +3,10 @@ package raft
 import (
 	"context"
 	"errors"
-	"sort"
 	"sync/atomic"
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
-	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/refs"
 )
 
@@ -68,61 +66,7 @@ func (t *Tx) Set(refName plumbing.ReferenceName, hash plumbing.Hash) bool {
 	}
 }
 
-func (t *Tx) getOps() ([]*refs.Oplog_Op, bool) {
-
-	needPack := false
-
-	ops := make([]*refs.Oplog_Op, 0, len(t.cmds))
-
-	for _, cmd := range t.cmds {
-
-		var fromHash, toHash []byte
-		if !cmd.Old.IsZero() {
-			hash := cmd.Old
-			fromHash = hash[:]
-		}
-
-		if !cmd.New.IsZero() {
-			hash := cmd.New
-			toHash = hash[:]
-			needPack = true
-		}
-
-		ops = append(ops, &refs.Oplog_Op{
-			Name:      proto.String(string(cmd.Name)),
-			OldTarget: fromHash,
-			Target:    toHash,
-		})
-
-	}
-
-	sort.Slice(ops, func(i, j int) bool {
-		return *ops[i].Name < *ops[j].Name
-	})
-
-	return ops, needPack
-}
-
 func (t *Tx) Commit(ctx context.Context, pack []byte, handle refs.ReqHandle) (DoingRequest, error) {
-
-	ops, needPack := t.getOps()
-	oplog := refs.Oplog{
-		Ops: ops,
-	}
-
-	if needPack {
-		oplog.ObjPack = pack
-	}
-
-	req, err := t.commit(ctx, oplog, handle)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-func (t *Tx) commit(ctx context.Context, oplog refs.Oplog, handle refs.ReqHandle) (DoingRequest, error) {
 
 	ctx = WithReqDoneCallback(ctx, t.done)
 	ctx = WithExpectedTerm(ctx, t.term)
@@ -134,7 +78,12 @@ func (t *Tx) commit(ctx context.Context, oplog refs.Oplog, handle refs.ReqHandle
 	if v := atomic.AddInt32(&t.refCnt, 1); v <= 0 {
 		panic(v)
 	}
-	req, err := t.rc.Propose(ctx, oplog, handle)
+
+	cmds := make([]*packp.Command, 0, len(t.cmds))
+	for _, cmd := range t.cmds {
+		cmds = append(cmds, cmd)
+	}
+	req, err := t.rc.Propose(ctx, cmds, pack, handle)
 	if err != nil {
 		t.done(err)
 		return nil, err

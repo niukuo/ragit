@@ -13,6 +13,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
@@ -42,7 +43,7 @@ type Raft interface {
 
 	InitRouter(mux *http.ServeMux)
 
-	Propose(ctx context.Context, oplog refs.Oplog, handle refs.ReqHandle) (DoingRequest, error)
+	Propose(ctx context.Context, cmds []*packp.Command, pack []byte, handle refs.ReqHandle) (DoingRequest, error)
 	proposeReadIndex(ctx context.Context, rctx []byte) error
 
 	getContext(term, index uint64) (*doingRequest, error)
@@ -356,9 +357,41 @@ func (rc *raftNode) confChange(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (rc *raftNode) Propose(ctx context.Context, oplog refs.Oplog, handle refs.ReqHandle) (DoingRequest, error) {
-	if err := refs.Validate(oplog); err != nil {
-		return nil, err
+func (rc *raftNode) Propose(ctx context.Context, cmds []*packp.Command, pack []byte, handle refs.ReqHandle) (DoingRequest, error) {
+
+	if len(cmds) == 0 {
+		return nil, errors.New("empty cmds")
+	}
+
+	var ops []*refs.Oplog_Op
+	deleteOnly := true
+
+	for _, cmd := range cmds {
+		if !strings.HasPrefix(string(cmd.Name), "refs/") {
+			return nil, fmt.Errorf("invalid refs: %s", cmd.Name)
+		}
+		op := &refs.Oplog_Op{
+			Name: proto.String(string(cmd.Name)),
+		}
+		if !cmd.Old.IsZero() {
+			hash := cmd.Old
+			op.OldTarget = hash[:]
+		}
+		if !cmd.New.IsZero() {
+			hash := cmd.New
+			op.Target = hash[:]
+			deleteOnly = false
+		}
+		ops = append(ops, op)
+	}
+
+	if deleteOnly && pack != nil {
+		return nil, errors.New("The packfile MUST NOT be sent if the only command used is 'delete'")
+	}
+
+	oplog := refs.Oplog{
+		Ops:     ops,
+		ObjPack: pack,
 	}
 
 	content, err := proto.Marshal(&oplog)
