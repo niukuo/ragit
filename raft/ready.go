@@ -34,9 +34,6 @@ type ReadyHandler interface {
 
 	ReadyC() chan<- <-chan *raft.Ready
 	AdvanceC() <-chan struct{}
-	IsFetchingSnapshot() bool
-	SetFetchingSnapshot()
-	GetLastIndex() (uint64, error)
 	GetMemberAddrs(memberID refs.PeerID) ([]string, error)
 }
 
@@ -59,10 +56,9 @@ type readyHandler struct {
 
 	transport *rafthttp.Transport
 
-	raft             Raft
-	readyC           chan (<-chan *raft.Ready)
-	advanceC         chan struct{}
-	fetchingSnapshot int32
+	raft     Raft
+	readyC   chan (<-chan *raft.Ready)
+	advanceC chan struct{}
 
 	readIndexIDGen *idutil.Generator
 	readIndexNext  unsafe.Pointer
@@ -447,7 +443,6 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 
 			atomic.StoreUint64(&rc.confIndex, snap.Metadata.Index)
 		}
-		atomic.StoreInt32(&rc.fetchingSnapshot, 0)
 
 		if err := rc.storage.Save(rd.HardState, rd.Entries); err != nil {
 			rc.raftLogger.Warning("persistent failed, err: ", err)
@@ -590,18 +585,6 @@ func (rc *readyHandler) ReadyC() chan<- <-chan *raft.Ready {
 
 func (rc *readyHandler) AdvanceC() <-chan struct{} {
 	return rc.advanceC
-}
-
-func (rc *readyHandler) IsFetchingSnapshot() bool {
-	return atomic.LoadInt32(&rc.fetchingSnapshot) != 0
-}
-
-func (rc *readyHandler) SetFetchingSnapshot() {
-	atomic.StoreInt32(&rc.fetchingSnapshot, 1)
-}
-
-func (rc *readyHandler) GetLastIndex() (uint64, error) {
-	return rc.storage.LastIndex()
 }
 
 func (rc *readyHandler) GetMemberAddrs(memberID refs.PeerID) ([]string, error) {
