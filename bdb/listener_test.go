@@ -24,12 +24,12 @@ func (l *emptyListener) Check(map[string]refs.Hash) error {
 	return nil
 }
 
-func (l *emptyListener) FetchObjects(refMap map[string]refs.Hash, addrs []string) error {
-	if len(addrs) == 0 {
-		return errors.New("nodeID should not be zero")
+func (l *emptyListener) FetchObjects(refMap map[string]refs.Hash, peerURLs []string) error {
+	if len(peerURLs) == 0 {
+		return errors.New("peer urls cannot be empty")
 	}
 
-	if strings.Contains(strings.Join(addrs, ","), "8080") { //return error for specific port
+	if strings.Contains(strings.Join(peerURLs, ","), "8080") { //return error for specific port
 		return errors.New("fetchObjects should not be call at when nodeID port is 8080")
 	}
 	return nil

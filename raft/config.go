@@ -9,12 +9,12 @@ import (
 
 type Config = *config
 type config struct {
-	TickDuration time.Duration
-	ClusterID    types.ID
+	TickDuration   time.Duration
+	ClusterID      types.ID
+	PeerListenURLs []string
 	raft.Config
 	StateMachine
 	Storage
-	LocalAddrs []string
 }
 
 func NewConfig() Config {

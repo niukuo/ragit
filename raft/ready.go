@@ -81,6 +81,10 @@ func RunNode(c Config,
 	opts ...NodeOptions,
 ) (Node, error) {
 
+	if len(c.PeerListenURLs) == 0 {
+		return nil, errors.New("PeerListenURLs cannot be empty")
+	}
+
 	id := PeerID(c.ID)
 
 	state, err := c.Storage.GetInitState()
@@ -96,10 +100,6 @@ func RunNode(c Config,
 		return nil, err
 	}
 
-	if len(c.LocalAddrs) == 0 {
-		return nil, errors.New("LocalAddrs is empty")
-	}
-
 	r := NewRaft(c, opts...)
 
 	sm := c.StateMachine
@@ -107,7 +107,7 @@ func RunNode(c Config,
 	transport := &rafthttp.Transport{
 		Logger:      zap.NewNop(),
 		ID:          types.ID(id),
-		URLs:        types.MustNewURLs(c.LocalAddrs),
+		URLs:        types.MustNewURLs(c.PeerListenURLs),
 		ClusterID:   c.ClusterID,
 		Raft:        r,
 		ServerStats: stats.NewServerStats(id.String(), id.String()),

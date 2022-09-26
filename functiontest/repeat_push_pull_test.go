@@ -90,7 +90,7 @@ func (s *GitServer) Start() error {
 
 	c.Storage = s.storage
 	c.StateMachine = s.storage
-	c.LocalAddrs = s.peerURLs
+	c.PeerListenURLs = s.peerURLs
 
 	s.node, err = raft.RunNode(c)
 	if err != nil {
