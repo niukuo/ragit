@@ -169,16 +169,16 @@ func (s *SMSuite) TestApply() {
 
 	s.NoError(s.storage.OnConfState(3, confState, member, pb.ConfChangeAddNode))
 	s.checkIndex(3, 2)
-	addrs, err := s.storage.GetMemberAddrs(refs.PeerID(111))
+	memberURLs, err := s.storage.GetURLsByMemberID(refs.PeerID(111))
 	s.NoError(err)
-	s.EqualValues(strings.Join(addrs, ","), "http://127.0.0.1:2022")
+	s.Equal("http://127.0.0.1:2022", strings.Join(memberURLs, ","))
 
 	confState = pb.ConfState{
 		Voters: []uint64{111, 222, 333},
 	}
 	s.NoError(s.storage.OnConfState(4, confState, member, pb.ConfChangeRemoveNode))
 	s.checkIndex(4, 2)
-	_, err = s.storage.GetMemberAddrs(refs.PeerID(444))
+	_, err = s.storage.GetURLsByMemberID(refs.PeerID(444))
 	s.Error(err)
 
 	m3 := refs.NewMember(refs.PeerID(444), []string{"127.0.0.4:2022"})
@@ -191,9 +191,9 @@ func (s *SMSuite) TestApply() {
 	}
 	s.NoError(s.storage.OnConfState(5, confState, member3, pb.ConfChangeAddLearnerNode))
 	s.checkIndex(5, 2)
-	addrs3, err := s.storage.GetMemberAddrs(refs.PeerID(333))
+	memberURLs, err = s.storage.GetURLsByMemberID(refs.PeerID(333))
 	s.NoError(err)
-	s.EqualValues(strings.Join(addrs3, ","), "http://127.0.0.3:2022")
+	s.Equal("http://127.0.0.3:2022", strings.Join(memberURLs, ","))
 
 	initState, err := s.storage.GetInitState()
 	s.NoError(err)

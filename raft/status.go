@@ -6,7 +6,6 @@ import (
 	"log"
 	"strings"
 
-	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/raft"
 )
 
@@ -39,23 +38,26 @@ func (s Status) String() string {
 	return string(b)
 }
 
-func (s Status) MemberStatus(getMemberAddrs func(memberID refs.PeerID) ([]string, error)) (*MemberStatus, error) {
-	idStrs, err := getMemberAddrs(PeerID(s.ID))
+func (s Status) MemberStatus(
+	getMemberURLs func() (map[PeerID][]string, error),
+) (*MemberStatus, error) {
+
+	// TODO: refactor member output
+	memberURLs, err := getMemberURLs()
 	if err != nil {
 		return nil, err
 	}
 
-	var leadStrs []string
+	var leaderURLs []string
 	if s.Lead != 0 {
-		leadStrs, err = getMemberAddrs(PeerID(s.Lead))
-		if err != nil {
-			return nil, err
-		}
+		leaderURLs = memberURLs[PeerID(s.Lead)]
 	}
 
+	idURLs := memberURLs[PeerID(s.ID)]
+
 	mstatus := &MemberStatus{
-		ID:        strings.Join(idStrs, ","),
-		Lead:      strings.Join(leadStrs, ","),
+		ID:        strings.Join(idURLs, ","),
+		Lead:      strings.Join(leaderURLs, ","),
 		Commit:    s.Commit,
 		RaftState: s.RaftState.String(),
 	}
@@ -69,12 +71,14 @@ func (s Status) MemberStatus(getMemberAddrs func(memberID refs.PeerID) ([]string
 			State:     v.State.String(),
 			IsLearner: v.IsLearner,
 		}
-		addrs, err := getMemberAddrs(PeerID(k))
-		if err != nil {
-			return nil, err
+
+		us, ok := memberURLs[PeerID(k)]
+		if !ok {
+			return nil, fmt.Errorf("id: %s not found in members: %v",
+				PeerID(k), memberURLs)
 		}
-		mstatus.Progress[strings.Join(addrs, ",")] = tracker
-		mstatus.Members[PeerID(k).String()] = addrs
+		mstatus.Progress[strings.Join(us, ",")] = tracker
+		mstatus.Members[PeerID(k).String()] = us
 	}
 
 	return mstatus, nil

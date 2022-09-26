@@ -34,7 +34,9 @@ type ReadyHandler interface {
 
 	ReadyC() chan<- <-chan *raft.Ready
 	AdvanceC() <-chan struct{}
-	GetMemberAddrs(memberID refs.PeerID) ([]string, error)
+
+	GetAllMemberURLs() (map[PeerID][]string, error)
+	GetURLsByMemberID(id PeerID) ([]string, error)
 }
 
 type readIndexState struct {
@@ -184,16 +186,22 @@ func RunNode(c Config,
 	r.Start(node, rc, c.TickDuration)
 	close(startChan)
 
-	for _, peerid := range state.ConfState.Voters {
-		peerid := PeerID(peerid)
-		if peerid == id {
+	memberURLs := make(map[PeerID][]string, len(state.Members))
+	for _, m := range state.Members {
+		memberURLs[m.ID] = m.PeerURLs
+	}
+
+	for _, peerID := range state.ConfState.Voters {
+		peerID := PeerID(peerID)
+		if peerID == id {
 			continue
 		}
-		peerAddrs, err := c.Storage.GetMemberAddrs(peerid)
-		if err != nil {
-			return nil, err
+		us, ok := memberURLs[peerID]
+		if !ok {
+			return nil, fmt.Errorf("voter: %s not found in members: %v",
+				peerID, memberURLs)
 		}
-		transport.AddPeer(types.ID(peerid), peerAddrs)
+		transport.AddPeer(types.ID(peerID), us)
 	}
 
 	for _, learnerID := range state.ConfState.Learners {
@@ -201,11 +209,12 @@ func RunNode(c Config,
 		if learnerID == id {
 			continue
 		}
-		learnerAddrs, err := c.Storage.GetMemberAddrs(learnerID)
-		if err != nil {
-			return nil, err
+		us, ok := memberURLs[learnerID]
+		if !ok {
+			return nil, fmt.Errorf("learner: %s not found in members: %v",
+				learnerID, memberURLs)
 		}
-		transport.AddPeer(types.ID(learnerID), learnerAddrs)
+		transport.AddPeer(types.ID(learnerID), us)
 	}
 
 	return rc, nil
@@ -417,16 +426,27 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			}
 
 			rc.transport.RemoveAllPeers()
+
+			snapshotData, err := refs.DecodeSnapshot(rd.Snapshot.Data)
+			if err != nil {
+				return err
+			}
+			memberURLs := make(map[PeerID][]string, len(snapshotData.Members))
+			for _, m := range snapshotData.Members {
+				memberURLs[m.ID] = m.PeerURLs
+			}
+
 			for _, id := range snap.Metadata.ConfState.Voters {
-				peer := PeerID(id)
-				if peer == rc.id {
+				peerID := PeerID(id)
+				if peerID == rc.id {
 					continue
 				}
-				peerAddrs, err := rc.storage.GetMemberAddrs(peer)
-				if err != nil {
-					return err
+				us, ok := memberURLs[peerID]
+				if !ok {
+					return fmt.Errorf("voter: %s not found in members: %v",
+						peerID, memberURLs)
 				}
-				rc.transport.AddPeer(types.ID(id), peerAddrs)
+				rc.transport.AddPeer(types.ID(id), us)
 			}
 
 			for _, id := range snap.Metadata.ConfState.Learners {
@@ -434,11 +454,12 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 				if learnerID == rc.id {
 					continue
 				}
-				learnerAddrs, err := rc.storage.GetMemberAddrs(learnerID)
-				if err != nil {
-					return err
+				us, exist := memberURLs[learnerID]
+				if !exist {
+					return fmt.Errorf("learner: %s not found in members: %v",
+						learnerID, memberURLs)
 				}
-				rc.transport.AddPeer(types.ID(id), learnerAddrs)
+				rc.transport.AddPeer(types.ID(id), us)
 			}
 
 			atomic.StoreUint64(&rc.confIndex, snap.Metadata.Index)
@@ -585,8 +606,12 @@ func (rc *readyHandler) AdvanceC() <-chan struct{} {
 	return rc.advanceC
 }
 
-func (rc *readyHandler) GetMemberAddrs(memberID refs.PeerID) ([]string, error) {
-	return rc.storage.GetMemberAddrs(memberID)
+func (rc *readyHandler) GetAllMemberURLs() (map[PeerID][]string, error) {
+	return rc.storage.GetAllMemberURLs()
+}
+
+func (rc *readyHandler) GetURLsByMemberID(id PeerID) ([]string, error) {
+	return rc.storage.GetURLsByMemberID(id)
 }
 
 func (rc *readyHandler) Handler() http.Handler {

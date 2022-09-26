@@ -29,6 +29,7 @@ var (
 
 var (
 	ErrReferenceNotFound = errors.New("reference not found")
+	ErrMemberIDNotFound  = errors.New("member id not found")
 )
 
 type Storage = *storage
@@ -326,30 +327,59 @@ func (s *storage) Save(
 	return nil
 }
 
-func (s *storage) GetMemberAddrs(memberID refs.PeerID) ([]string, error) {
-	var addrs []string
+func (s *storage) GetURLsByMemberID(id refs.PeerID) ([]string, error) {
+
+	peerURLs := make([]string, 0)
+
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		membersb := tx.Bucket(BucketMembers)
 
 		var key [8]byte
-		binary.BigEndian.PutUint64(key[:], uint64(memberID))
-		val := membersb.Get(key[:])
-		if val == nil {
-			return fmt.Errorf("member not exist, memberID: %v", uint64(memberID))
+		binary.BigEndian.PutUint64(key[:], uint64(id))
+
+		v := membersb.Get(key[:])
+		if v == nil {
+			return ErrMemberIDNotFound
 		}
 
-		var mInDB memberInDB
-		if err := json.Unmarshal(val, &mInDB); err != nil {
-			return fmt.Errorf("unmarshal failed, val: %v", string(val))
+		var attr memberInDB
+		if err := json.Unmarshal(v, &attr); err != nil {
+			return err
 		}
 
-		addrs = mInDB.PeerAddrs
+		peerURLs = attr.PeerAddrs
+
+		return nil
+
+	}); err != nil {
+		return nil, err
+	}
+
+	return peerURLs, nil
+}
+
+func (s *storage) GetAllMemberURLs() (map[refs.PeerID][]string, error) {
+
+	memberURLs := make(map[refs.PeerID][]string, 0)
+
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		membersb := tx.Bucket(BucketMembers)
+
+		members, err := getAllMembers(membersb)
+		if err != nil {
+			return err
+		}
+
+		for _, m := range members {
+			memberURLs[m.ID] = m.PeerURLs
+		}
+
 		return nil
 	}); err != nil {
 		return nil, err
 	}
 
-	return addrs, nil
+	return memberURLs, nil
 }
 
 func saveMembers(s *storage, membersb *bbolt.Bucket, members []refs.Member, confType pb.ConfChangeType) error {

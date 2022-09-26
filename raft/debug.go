@@ -124,7 +124,7 @@ func (rc *readyHandler) getLeaderStat(w http.ResponseWriter, r *http.Request) {
 		convStr := str
 		id, err := strconv.ParseUint(str, 16, 64)
 		if err == nil {
-			convStrs, err := rc.storage.GetMemberAddrs(refs.PeerID(id))
+			convStrs, err := rc.storage.GetURLsByMemberID(refs.PeerID(id))
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return

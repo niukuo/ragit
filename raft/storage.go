@@ -24,9 +24,10 @@ type Storage interface {
 	GetInitState() (*InitialState, error)
 	Save(hardState pb.HardState, entries []pb.Entry) error
 
-	GetMemberAddrs(memberID refs.PeerID) ([]string, error)
 	GetLeaderTerm() uint64
 	GetAllRefs() (map[string]refs.Hash, error)
+	GetAllMemberURLs() (map[PeerID][]string, error)
+	GetURLsByMemberID(id PeerID) ([]string, error)
 
 	Describe(w io.Writer)
 

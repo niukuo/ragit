@@ -325,7 +325,7 @@ func (h *httpGitAPI) getMemberStatus(ctx context.Context) (*raft.MemberStatus, e
 	}
 
 	storage := h.rdb.(bdb.Storage)
-	memberStatus, err := status.MemberStatus(storage.GetMemberAddrs)
+	memberStatus, err := status.MemberStatus(storage.GetAllMemberURLs)
 	if err != nil {
 		h.logger.Errorf("status.MemberStatus failed, err: %v", err)
 		return nil, err
