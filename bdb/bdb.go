@@ -145,7 +145,7 @@ func (s *storage) initBuckets(newLocalID func() refs.PeerID) error {
 				return err
 			}
 
-			if err := convertToMembers(s, tx); err != nil {
+			if err := s.convertConfStateToMembers(tx); err != nil {
 				return err
 			}
 
@@ -189,18 +189,35 @@ func (s *storage) initBuckets(newLocalID func() refs.PeerID) error {
 	return nil
 }
 
-func convertToMembers(s *storage, tx *bbolt.Tx) error {
-	members, err := getMembersByConfState(tx)
-	if err != nil {
+func (s *storage) convertConfStateToMembers(tx *bbolt.Tx) error {
+
+	metab := tx.Bucket(BucketMeta)
+
+	var confState pb.ConfState
+	if err := confState.Unmarshal(metab.Get([]byte("conf_state"))); err != nil {
 		return err
 	}
+
+	confIDs := append(confState.Voters, confState.Learners...)
+
+	members := make([]refs.Member, 0, len(confIDs))
+	for _, id := range confIDs {
+		members = append(members, refs.NewMember(
+			refs.PeerID(id), []string{
+				ipv4ToHttpAddr(id),
+			},
+		))
+	}
+
+	s.logger.Warningf("convert ConfState: %v to initial members: %v",
+		confState, members)
 
 	membersb, err := tx.CreateBucket(BucketMembers)
 	if err != nil {
 		return err
 	}
 
-	if err := saveMembers(s, membersb, members, pb.ConfChangeAddNode); err != nil {
+	if err := onMemberChange(membersb, members, pb.ConfChangeAddNode); err != nil {
 		return err
 	}
 
@@ -229,24 +246,6 @@ func ipv4ToHttpAddr(id uint64) string {
 	return fmt.Sprintf("http://%s:%v", ipv4, port)
 }
 
-func getMembersByConfState(tx *bbolt.Tx) ([]refs.Member, error) {
-	metab := tx.Bucket(BucketMeta)
-	var confState pb.ConfState
-	if err := confState.Unmarshal(metab.Get([]byte("conf_state"))); err != nil {
-		return nil, err
-	}
-
-	confMembers := append(confState.Voters, confState.Learners...)
-	members := make([]refs.Member, len(confMembers))
-	for idx, cMemberID := range confMembers {
-		id := refs.PeerID(cMemberID)
-		m := refs.NewMember(id, []string{ipv4ToHttpAddr(cMemberID)})
-		members[idx] = m
-	}
-
-	return members, nil
-}
-
 func (s *storage) Close() {
 	s.db.Close()
 	s.db = nil
@@ -256,14 +255,20 @@ func (s *storage) Close() {
 
 func getAllMembers(membersb *bbolt.Bucket) ([]refs.Member, error) {
 	members := make([]refs.Member, 0)
+
 	if err := membersb.ForEach(func(k, v []byte) error {
-		mID := refs.PeerID(binary.BigEndian.Uint64(k))
+
+		id := refs.PeerID(binary.BigEndian.Uint64(k))
+
 		var attr memberAttributes
 		if err := json.Unmarshal(v, &attr); err != nil {
 			return err
 		}
-		members = append(members, refs.NewMember(mID, attr.PeerURLs))
+
+		members = append(members, refs.NewMember(id, attr.PeerURLs))
+
 		return nil
+
 	}); err != nil {
 		return nil, err
 	}
@@ -397,23 +402,25 @@ func (s *storage) GetAllMemberURLs() (map[refs.PeerID][]string, error) {
 	return memberURLs, nil
 }
 
-func saveMembers(s *storage, membersb *bbolt.Bucket, members []refs.Member, confType pb.ConfChangeType) error {
+func onMemberChange(membersb *bbolt.Bucket, members []refs.Member, confType pb.ConfChangeType) error {
 	switch confType {
 	case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
 		for _, m := range members {
 			var key [8]byte
 			binary.BigEndian.PutUint64(key[:], uint64(m.ID))
+
 			attr := memberAttributes{
 				PeerURLs: m.PeerURLs,
 			}
+
 			val, err := json.Marshal(attr)
 			if err != nil {
 				return err
 			}
+
 			if err := membersb.Put(key[:], val); err != nil {
 				return err
 			}
-
 		}
 	case pb.ConfChangeRemoveNode:
 		for _, m := range members {
@@ -479,7 +486,7 @@ func (s *storage) OnSnapshot(
 		return err
 	}
 
-	if err := checkMembers(snapshotData.Members, snapshot.Metadata.ConfState); err != nil {
+	if err := validateMembers(snapshotData.Members, snapshot.Metadata.ConfState); err != nil {
 		return err
 	}
 
@@ -498,8 +505,8 @@ func (s *storage) OnSnapshot(
 		", index: ", snapshot.Metadata.Index,
 		", peers: ", peers,
 		", learners: ", learners,
-		", members:", snapshotData.Members,
-		",")
+		", members: ", snapshotData.Members,
+	)
 
 	snapshotReceive.WithLabelValues(objSrcNode.String()).Inc()
 
@@ -539,22 +546,22 @@ func (s *storage) OnSnapshot(
 			return err
 		}
 
-		members := make([]refs.Member, len(snapshotData.Members))
-		var ObjSrcAddrs []string
-		for idx, m := range snapshotData.Members {
-			members[idx] = m
+		var peerURLs []string
+		for _, m := range snapshotData.Members {
 			if m.ID == objSrcNode {
-				ObjSrcAddrs = m.PeerURLs
+				peerURLs = m.PeerURLs
+				break
 			}
 		}
+
 		membersb := tx.Bucket(BucketMembers)
-		if err := saveMembers(s, membersb, members, pb.ConfChangeAddNode); err != nil {
+		if err := onMemberChange(membersb, snapshotData.Members, pb.ConfChangeAddNode); err != nil {
 			return err
 		}
 
 		start := time.Now()
 
-		if err := s.listener.FetchObjects(snapshotData.Refs, ObjSrcAddrs); err != nil {
+		if err := s.listener.FetchObjects(snapshotData.Refs, peerURLs); err != nil {
 			return err
 		}
 
@@ -593,8 +600,7 @@ func (s *storage) OnConfState(index uint64, confState pb.ConfState, changeMember
 		}
 
 		membersb := tx.Bucket(BucketMembers)
-		err := saveMembers(s, membersb, changeMembers, opType)
-		if err != nil {
+		if err := onMemberChange(membersb, changeMembers, opType); err != nil {
 			return err
 		}
 
@@ -603,7 +609,7 @@ func (s *storage) OnConfState(index uint64, confState pb.ConfState, changeMember
 			return err
 		}
 
-		if err := checkMembers(existMembers, confState); err != nil {
+		if err := validateMembers(existMembers, confState); err != nil {
 			return err
 		}
 
@@ -616,22 +622,23 @@ func (s *storage) OnConfState(index uint64, confState pb.ConfState, changeMember
 	return nil
 }
 
-func checkMembers(existMembers []refs.Member, confState pb.ConfState) error {
-	if len(confState.Learners)+len(confState.Voters) != len(existMembers) {
-		return fmt.Errorf("len not equal, confState: %+v, existMembers: %+v", confState, existMembers)
+func validateMembers(members []refs.Member, confState pb.ConfState) error {
+	confPeers := append(confState.Voters, confState.Learners...)
+	if len(confPeers) != len(members) {
+		return fmt.Errorf("len not equal, confState: %v, members: %v",
+			confState, members)
 	}
 
-	confMembers := append(confState.Voters, confState.Learners...)
-	for _, voter := range confMembers {
-		voterID := refs.PeerID(voter)
-		ok := false
-		for _, m := range existMembers {
-			if m.ID == voterID {
-				ok = true
-			}
-		}
-		if !ok {
-			return fmt.Errorf("member Inconsistent,confState: %+v, existMembers: %+v", confState, existMembers)
+	memberMap := make(map[refs.PeerID]struct{}, len(members))
+	for _, m := range members {
+		memberMap[m.ID] = struct{}{}
+	}
+
+	for _, peer := range confPeers {
+		peerID := refs.PeerID(peer)
+		if _, ok := memberMap[peerID]; !ok {
+			return fmt.Errorf("id: %s not found in members: %v, confState: %v",
+				peerID, members, confState)
 		}
 	}
 
@@ -778,7 +785,7 @@ func (s *storage) InitialState() (pb.HardState, pb.ConfState, error) {
 
 func (s *storage) Bootstrap(members []refs.Member) error {
 	if len(members) == 0 {
-		return errors.New("cant bootstrap with empty peers")
+		return errors.New("cant bootstrap with empty members")
 	}
 	s.logger.Info("bootstraping using ", members)
 
@@ -839,7 +846,7 @@ func (s *storage) Bootstrap(members []refs.Member) error {
 		}
 
 		membersb := tx.Bucket(BucketMembers)
-		if err := saveMembers(s, membersb, members, pb.ConfChangeAddNode); err != nil {
+		if err := onMemberChange(membersb, members, pb.ConfChangeAddNode); err != nil {
 			return err
 		}
 
