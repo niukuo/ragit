@@ -18,20 +18,17 @@ import (
 	etcdraft "go.etcd.io/etcd/raft"
 )
 
-var LocalAddr = flag.String("id", "127.0.0.1:9021", "node ID")
-var PeerAddrs = flag.String("cluster", "127.0.0.1:9021", "comma separated cluster peers")
-
 func main() {
+
+	cluster := flag.String("cluster", "http://127.0.0.1:9021", "comma separated peer urls, joined different node by semicolon")
+	peer := flag.String("peer_listen_urls", "http://127.0.0.1:9021", "list of comma separated URLs to listen on for peer traffic")
 
 	flag.Parse()
 
-	myid := refs.NewMemberID([]string{*LocalAddr}, nil)
+	var peerListenURLs []string
+	peerListenURLs = append(peerListenURLs, strings.Split(*peer, ",")...)
 
-	peers := make([]raft.PeerID, 0)
-	for _, peerAddr := range strings.Split(*LocalAddr, ",") {
-		id := refs.NewMemberID([]string{peerAddr}, nil)
-		peers = append(peers, id)
-	}
+	myid := refs.NewMemberID(peerListenURLs, nil)
 
 	dir := strings.Replace(myid.String(), ":", "_", -1)
 
@@ -42,9 +39,9 @@ func main() {
 
 	opts := bdb.NewOptions()
 	opts.Listener = listener
-	opts.Logger = logging.GetLogger("")
+	opts.Logger = logging.GetLogger("bdb")
 	opts.NewLocalID = func() refs.PeerID {
-		return refs.NewMemberID([]string{*LocalAddr}, nil)
+		return refs.NewMemberID(peerListenURLs, nil)
 	}
 
 	storage, err := bdb.Open(dir, opts)
@@ -56,11 +53,15 @@ func main() {
 		log.Fatalln(err)
 	} else if etcdraft.IsEmptyHardState(hardState) && len(confState.Learners)+len(confState.Voters) == 0 {
 		members := make([]refs.Member, 0)
-		peerAddrs := strings.Split(*PeerAddrs, ",")
-		for _, addr := range peerAddrs {
-			memberID := refs.NewMemberID([]string{addr}, nil)
-			members = append(members, refs.NewMember(memberID, []string{addr}))
+
+		for _, node := range strings.Split(*cluster, ";") {
+			urls := strings.Split(node, ",")
+			members = append(members, refs.NewMember(
+				refs.NewMemberID(urls, nil),
+				urls,
+			))
 		}
+
 		if err := storage.Bootstrap(members); err != nil {
 			log.Fatalln("bootstrap failed: ", err)
 		}
@@ -69,7 +70,6 @@ func main() {
 	// raft provides a commit stream for the proposals from the http api
 	c := raft.NewConfig()
 	c.Config = etcdraft.Config{
-		ID:                        uint64(myid),
 		ElectionTick:              10,
 		HeartbeatTick:             1,
 		Storage:                   storage,
@@ -80,6 +80,7 @@ func main() {
 	}
 	c.Storage = storage
 	c.StateMachine = storage
+	c.PeerListenURLs = peerListenURLs
 
 	node, err := raft.RunNode(c)
 	if err != nil {
@@ -92,9 +93,11 @@ func main() {
 	mux.Handle("/raft/", nh)
 	mux.Handle("/debug/", http.DefaultServeMux)
 	mux.Handle("/refs/", api.NewHandler(storage, node))
-	mux.Handle("/repo.git/", http.StripPrefix("/repo.git", api.NewGitHandler("repo.git", storage, node, logging.GetLogger("repo.git"))))
+	mux.Handle("/repo.git/", http.StripPrefix("/repo.git",
+		api.NewGitHandler("repo.git", storage, node, logging.GetLogger("repo.git"))),
+	)
 
-	log.Fatalln(http.ListenAndServe(fmt.Sprintf("%v:%v", uint32(myid>>32), uint16(myid)), LogHandler(mux)))
+	log.Fatalln(http.ListenAndServe(strings.TrimPrefix(peerListenURLs[0], "http://"), LogHandler(mux)))
 }
 
 func LogHandler(def http.Handler) http.Handler {
