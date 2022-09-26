@@ -85,13 +85,19 @@ func RunNode(c Config,
 		return nil, errors.New("PeerListenURLs cannot be empty")
 	}
 
-	id := PeerID(c.ID)
-
 	state, err := c.Storage.GetInitState()
 	if err != nil {
 		return nil, err
 	}
 
+	if c.ID != 0 && c.ID != state.LocalID {
+		return nil, fmt.Errorf("local id mismatch, expected: %s, actual: %s",
+			PeerID(state.LocalID), types.ID(c.ID))
+	}
+
+	id := PeerID(state.LocalID)
+
+	c.Config.ID = state.LocalID
 	c.Config.DisableProposalForwarding = true
 	c.Config.Applied = state.AppliedIndex
 

@@ -31,6 +31,7 @@ var (
 var (
 	ErrReferenceNotFound = errors.New("reference not found")
 	ErrMemberIDNotFound  = errors.New("member id not found")
+	ErrLocalIDIsZero     = errors.New("local_id cannot be 0")
 )
 
 type Storage = *storage
@@ -136,6 +137,9 @@ func (s *storage) initBuckets(newLocalID func() refs.PeerID) error {
 			}
 
 			localID := newLocalID()
+			if localID == refs.PeerID(0) {
+				return ErrLocalIDIsZero
+			}
 
 			s.logger.Warning("filling local_id to ", localID)
 
@@ -165,10 +169,15 @@ func (s *storage) initBuckets(newLocalID func() refs.PeerID) error {
 			return err
 		}
 
+		localID := newLocalID()
+		if localID == refs.PeerID(0) {
+			return ErrLocalIDIsZero
+		}
+
 		if err := putUint64(stateb, map[string]uint64{
 			"term":     0,
 			"vote":     0,
-			"local_id": uint64(newLocalID()),
+			"local_id": uint64(localID),
 		}); err != nil {
 			return err
 		}
