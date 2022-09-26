@@ -43,8 +43,11 @@ func main() {
 	opts := bdb.NewOptions()
 	opts.Listener = listener
 	opts.Logger = logging.GetLogger("")
+	opts.NewLocalID = func() refs.PeerID {
+		return refs.NewMemberID([]string{*LocalAddr}, nil)
+	}
 
-	storage, err := bdb.Open(dir, opts, getLocalID)
+	storage, err := bdb.Open(dir, opts)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -99,10 +102,4 @@ func LogHandler(def http.Handler) http.Handler {
 		fmt.Println(r.Method, r.URL)
 		def.ServeHTTP(w, r)
 	})
-}
-
-func getLocalID() (refs.PeerID, error) {
-	localID := refs.NewMemberID([]string{*LocalAddr}, nil)
-
-	return localID, nil
 }

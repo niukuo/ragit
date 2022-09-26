@@ -17,8 +17,8 @@ import (
 )
 
 var flagDBPath = flag.String("bdbpath", "mydb", "db path")
-var getLocalID = func() (refs.PeerID, error) {
-	return 222, nil
+var newLocalID = func() refs.PeerID {
+	return 222
 }
 
 func TestDB(t *testing.T) {
@@ -28,7 +28,8 @@ func TestDB(t *testing.T) {
 		os.RemoveAll(path)
 		opts := bdb.NewOptions()
 		opts.Logger = logging.GetLogger("")
-		db, err := bdb.Open(path, opts, getLocalID)
+		opts.NewLocalID = newLocalID
+		db, err := bdb.Open(path, opts)
 		s.NoError(err)
 
 		return db
@@ -43,7 +44,8 @@ func TestSM(t *testing.T) {
 		opts := bdb.NewOptions()
 		opts.Listener = &emptyListener{}
 		opts.Logger = logging.GetLogger("")
-		db, err := bdb.Open(path, opts, getLocalID)
+		opts.NewLocalID = newLocalID
+		db, err := bdb.Open(path, opts)
 		s.NoError(err)
 		m1 := refs.NewMember(refs.PeerID(111), []string{"http://127.0.0.1:2022"})
 		m2 := refs.NewMember(refs.PeerID(222), []string{"http://127.0.0.2:2022"})

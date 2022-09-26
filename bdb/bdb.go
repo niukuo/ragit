@@ -53,6 +53,8 @@ type Options struct {
 	Logger logging.Logger
 
 	*WALOptions
+
+	NewLocalID func() refs.PeerID
 }
 
 func NewOptions() *Options {
@@ -66,11 +68,8 @@ type memberInDB struct {
 	PeerAddrs []string
 }
 
-type GetLocalID func() (refs.PeerID, error)
-
 func Open(path string,
 	opts *Options,
-	getLocalID GetLocalID,
 ) (Storage, error) {
 
 	walOpts := opts.WALOptions
@@ -98,7 +97,7 @@ func Open(path string,
 		logger:     opts.Logger,
 	}
 
-	err = s.initBuckets(getLocalID)
+	err = s.initBuckets(opts.NewLocalID)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +110,7 @@ func Open(path string,
 	return s, nil
 }
 
-func (s *storage) initBuckets(getLocalID GetLocalID) error {
+func (s *storage) initBuckets(newLocalID func() refs.PeerID) error {
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
 		metab, err := tx.CreateBucket(BucketMeta)
 		if err != nil {
@@ -131,19 +130,17 @@ func (s *storage) initBuckets(getLocalID GetLocalID) error {
 			}
 
 			stateb := tx.Bucket(BucketState)
-			myID := stateb.Get([]byte("local_id"))
-			if myID != nil {
+			if id := stateb.Get([]byte("local_id")); id != nil {
 				return nil
 			}
 
-			localID, err := getLocalID()
-			if err != nil {
-				return err
-			}
-			err = putUint64(stateb, map[string]uint64{
+			localID := newLocalID()
+
+			s.logger.Warning("filling local_id to ", localID)
+
+			if err := putUint64(stateb, map[string]uint64{
 				"local_id": uint64(localID),
-			})
-			if err != nil {
+			}); err != nil {
 				return err
 			}
 
@@ -167,14 +164,10 @@ func (s *storage) initBuckets(getLocalID GetLocalID) error {
 			return err
 		}
 
-		localID, err := getLocalID()
-		if err != nil {
-			return err
-		}
 		if err := putUint64(stateb, map[string]uint64{
 			"term":     0,
 			"vote":     0,
-			"local_id": uint64(localID),
+			"local_id": uint64(newLocalID()),
 		}); err != nil {
 			return err
 		}

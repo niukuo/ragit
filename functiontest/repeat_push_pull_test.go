@@ -73,10 +73,10 @@ func startRagit(s *assert.Assertions, dir, localAddr, peerAddrs string) (raft.No
 	opts := bdb.NewOptions()
 	opts.Listener = listener
 	opts.Logger = logging.GetLogger("")
-	storage, err := bdb.Open(dir, opts, func() (refs.PeerID, error) {
-		localID := refs.NewMemberID([]string{localAddr}, nil)
-		return localID, nil
-	})
+	opts.NewLocalID = func() refs.PeerID {
+		return refs.NewMemberID([]string{localAddr}, nil)
+	}
+	storage, err := bdb.Open(dir, opts)
 	s.NoError(err)
 	if hardState, confState, err := storage.InitialState(); err != nil {
 		s.NoError(err)
