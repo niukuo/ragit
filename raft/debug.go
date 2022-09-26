@@ -107,45 +107,7 @@ func (rc *readyHandler) getServerStat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rc *readyHandler) getLeaderStat(w http.ResponseWriter, r *http.Request) {
-	var stat map[string]json.RawMessage
-	if err := json.Unmarshal(rc.transport.LeaderStats.JSON(), &stat); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	var followers map[string]map[string]json.RawMessage
-	if err := json.Unmarshal(stat["followers"], &followers); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	newFollowers := make([]map[string]json.RawMessage, 0, len(followers))
-	for str, follower := range followers {
-		convStr := str
-		id, err := strconv.ParseUint(str, 16, 64)
-		if err == nil {
-			convStrs, err := rc.storage.GetURLsByMemberID(refs.PeerID(id))
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			convStr = strings.Join(convStrs, ",")
-		}
-		follower["id"] = json.RawMessage(strconv.Quote(convStr))
-		newFollowers = append(newFollowers, follower)
-
-		sort.Slice(newFollowers, func(i, j int) bool {
-			return string(newFollowers[i]["id"]) < string(newFollowers[j]["id"])
-		})
-	}
-
-	fdata, err := json.Marshal(newFollowers)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	stat["followers"] = json.RawMessage(fdata)
-
+	stat := json.RawMessage(rc.transport.LeaderStats.JSON())
 	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	encoder.SetEscapeHTML(false)
