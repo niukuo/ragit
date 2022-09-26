@@ -2,9 +2,9 @@ package functiontest
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,146 +19,190 @@ import (
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 	etcdraft "go.etcd.io/etcd/raft"
 )
 
-func TestRepeatPushPull(t *testing.T) {
-	s := assert.New(t)
-	localAddr := "http://127.0.0.1:9021"
-	peerAddrs := "http://127.0.0.1:9021"
-	dir := "./test/"
+type GitServer struct {
+	dir      string
+	peerURLs []string
 
-	node, storage, httpServer := startRagit(s, dir, localAddr, peerAddrs)
-
-	cmdStr := "cd test/; mkdir pullPath;mkdir pushPath;cd pullPath;git init;git remote add origin http://127.0.0.1:9021/repo.git;cd ../pushPath;git init;git remote add origin http://127.0.0.1:9021/repo.git;cd ../../"
-	runCmd := exec.Command("/bin/bash", "-c", cmdStr)
-	err := runCmd.Run()
-	s.NoError(err)
-
-	gitConfigCmd := "cd test/pushPath; git config user.email abc@alibaba.com; git config user.name abc; cd ../pullPath; git config user.email abc@alibaba.com; git config user.name abc"
-	runCmd = exec.Command("/bin/bash", "-c", gitConfigCmd)
-	err = runCmd.Run()
-	s.NoError(err)
-
-	for i := 0; i < 10; i++ {
-		pushCmdStr := "cd test/pushPath; echo a >> a.txt; git add a.txt; git commit -m a; git push origin HEAD -f"
-		runCmd := exec.Command("/bin/bash", "-c", pushCmdStr)
-		stdout, err := runCmd.CombinedOutput()
-		s.NoError(err, string(stdout))
-
-		pullCmdStr := "cd test/pullPath; git pull origin master -f"
-		runCmd = exec.Command("/bin/bash", "-c", pullCmdStr)
-		stdout, err = runCmd.CombinedOutput()
-		s.NoError(err, string(stdout))
-
-		diffCmdStr := "diff test/pullPath/a.txt test/pushPath/a.txt"
-		runCmd = exec.Command("/bin/bash", "-c", diffCmdStr)
-		stdout, err = runCmd.CombinedOutput()
-		s.NoError(err, string(stdout))
-	}
-
-	closeRagit(dir, node, storage, httpServer)
+	storage bdb.Storage
+	node    raft.Node
 }
 
-func startRagit(s *assert.Assertions, dir, localAddr, peerAddrs string) (raft.Node, bdb.Storage, *http.Server) {
-	myid := refs.NewMemberID([]string{localAddr}, nil)
-	peers := make([]raft.PeerID, 0)
-	id := refs.NewMemberID([]string{peerAddrs}, nil)
-	peers = append(peers, id)
+func NewGitServer(dir string, peerURLs []string) *GitServer {
+	return &GitServer{
+		dir:      dir,
+		peerURLs: peerURLs,
+	}
+}
 
-	os.RemoveAll(dir)
-	listener, err := gitexec.NewListener(path.Join(dir, "repo.git"), logging.GetLogger("gitexec"))
-	s.NoError(err)
+func (s *GitServer) Start() error {
+
+	listener, err := gitexec.NewListener(
+		path.Join(s.dir, "repo.git"), logging.GetLogger("gitexec"),
+	)
+	if err != nil {
+		return err
+	}
+
+	myid := refs.NewMemberID(s.peerURLs, nil)
+
 	opts := bdb.NewOptions()
 	opts.Listener = listener
 	opts.Logger = logging.GetLogger("")
 	opts.NewLocalID = func() refs.PeerID {
-		return refs.NewMemberID([]string{localAddr}, nil)
+		return refs.NewMemberID(s.peerURLs, nil)
 	}
-	storage, err := bdb.Open(dir, opts)
-	s.NoError(err)
-	if hardState, confState, err := storage.InitialState(); err != nil {
-		s.NoError(err)
-	} else if etcdraft.IsEmptyHardState(hardState) && len(confState.Learners)+len(confState.Voters) == 0 {
-		members := make([]refs.Member, 0)
-		peerAddrs := strings.Split(peerAddrs, ",")
-		for _, addr := range peerAddrs {
-			memberID := refs.NewMemberID([]string{addr}, nil)
-			members = append(members, refs.NewMember(memberID, []string{addr}))
+
+	s.storage, err = bdb.Open(s.dir, opts)
+	if err != nil {
+		return err
+	}
+
+	if hardState, confState, err := s.storage.InitialState(); err != nil {
+		return err
+	} else if etcdraft.IsEmptyHardState(hardState) &&
+		len(confState.Learners)+len(confState.Voters) == 0 {
+		members := []refs.Member{
+			{
+				ID:       myid,
+				PeerURLs: s.peerURLs,
+			},
 		}
-		err := storage.Bootstrap(members)
-		s.NoError(err)
+		if err := s.storage.Bootstrap(members); err != nil {
+			return err
+		}
 	}
+
 	c := raft.NewConfig()
 	c.Config = etcdraft.Config{
 		ID:                        uint64(myid),
-		ElectionTick:              10,
+		ElectionTick:              3,
 		HeartbeatTick:             1,
-		Storage:                   storage,
+		Storage:                   s.storage,
 		MaxSizePerMsg:             1024 * 1024,
 		MaxInflightMsgs:           256,
 		MaxUncommittedEntriesSize: 1 << 30,
 		PreVote:                   true,
 	}
-	c.Storage = storage
-	c.StateMachine = storage
-	c.LocalAddrs = []string{localAddr}
-	node, err := raft.RunNode(c)
-	s.NoError(err)
+
+	c.Storage = s.storage
+	c.StateMachine = s.storage
+	c.LocalAddrs = s.peerURLs
+
+	s.node, err = raft.RunNode(c)
+	if err != nil {
+		return err
+	}
+
+	s.becomeLeader()
+
 	mux := http.NewServeMux()
-	nh := node.Handler()
+	nh := s.node.Handler()
 	mux.Handle("/raft", nh)
 	mux.Handle("/raft/", nh)
 	mux.Handle("/debug/", http.DefaultServeMux)
-	mux.Handle("/refs/", api.NewHandler(storage, node))
-	mux.Handle("/repo.git/", http.StripPrefix("/repo.git", api.NewGitHandler("./test/repo.git", storage, node, logging.GetLogger("./test/repo.git"))))
+	mux.Handle("/refs/", api.NewHandler(s.storage, s.node))
+	mux.Handle("/repo.git/",
+		http.StripPrefix("/repo.git",
+			api.NewGitHandler(
+				path.Join(s.dir, "repo.git"),
+				s.storage, s.node, logging.GetLogger("git.op"))))
+
 	httpServer := &http.Server{
-		Addr:    strings.Trim(localAddr, "http://"),
+		Addr:    strings.TrimPrefix(s.peerURLs[0], "http://"),
 		Handler: mux,
 	}
+
 	go func() {
 		err := httpServer.ListenAndServe()
-		s.Error(err, http.ErrServerClosed)
+		log.Fatal("http.ListenAndServe err: ", err)
 	}()
 
+	return nil
+}
+
+func (s *GitServer) becomeLeader() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	for {
-		memberStatus, err := getMemberStatus(localAddr)
-		if err != nil || memberStatus == nil || memberStatus.Lead == "" {
-			time.Sleep(1 * time.Second)
-			continue
+		select {
+		case <-time.After(time.Second):
+			if s.storage.GetLeaderTerm() != 0 {
+				log.Println("became leader")
+				return
+			}
+
+		case <-ctx.Done():
+			panic(fmt.Sprintf("wait err: %s", ctx.Err()))
 		}
-		break
 	}
-
-	return node, storage, httpServer
 }
 
-func closeRagit(dir string, node raft.Node, storage bdb.Storage, httpServer *http.Server) {
-	rc := node.(raft.ReadyHandler)
-	rc.Stop()
-	storage.Close()
-	httpServer.Shutdown(context.Background())
-	os.RemoveAll(dir)
+func (s *GitServer) Stop() {
+	s.node.(raft.ReadyHandler).Stop()
+	s.storage.Close()
+	os.RemoveAll(s.dir)
 }
 
-func getMemberStatus(addr string) (*raft.MemberStatus, error) {
-	url := addr + "/raft/members"
-	resp, err := http.DefaultClient.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cluster response, url: %v, err: %v", url, err)
-	}
+type GitServerFT struct {
+	suite.Suite
+	gitServer *GitServer
+}
 
-	data, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("failed to read body of cluster response, err: %v", err)
-	}
+func TestGitServerFT(t *testing.T) {
+	suite.Run(t, new(GitServerFT))
+}
 
-	var memberStatus raft.MemberStatus
-	if err := json.Unmarshal(data, &memberStatus); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cluster response, err: %v, memberStatus: %+v", err, memberStatus)
-	}
+func (s *GitServerFT) SetupSuite() {
 
-	return &memberStatus, nil
+	dir, err := ioutil.TempDir("", "ragit_test")
+	s.NoError(err)
+
+	s.gitServer = NewGitServer(dir, []string{"http://127.0.0.1:9022"})
+
+	s.NoError(s.gitServer.Start())
+}
+
+func (s *GitServerFT) TearDownSuite() {
+	s.gitServer.Stop()
+}
+
+func (s *GitServerFT) TestRepeatPushAndPull() {
+	dataDir, err := ioutil.TempDir("", "data")
+	s.NoError(err)
+	defer os.RemoveAll(dataDir)
+
+	initRepo := "mkdir pullPath;mkdir pushPath;cd pullPath;git init;git remote add origin http://127.0.0.1:9022/repo.git;cd ../pushPath;git init;git remote add origin http://127.0.0.1:9022/repo.git"
+	cmd := exec.Command("/bin/bash", "-c", initRepo)
+	cmd.Dir = dataDir
+	s.NoError(cmd.Run())
+
+	gitConfig := "cd pushPath; git config user.email abc@alibaba.com; git config user.name abc; cd ../pullPath; git config user.email abc@alibaba.com; git config user.name abc"
+	cmd = exec.Command("/bin/bash", "-c", gitConfig)
+	cmd.Dir = dataDir
+	s.NoError(cmd.Run())
+
+	for i := 0; i < 10; i++ {
+		push := "cd pushPath; echo a >> a.txt; git add a.txt; git commit -m a; git push origin HEAD"
+		cmd := exec.Command("/bin/bash", "-c", push)
+		cmd.Dir = dataDir
+		stdout, err := cmd.CombinedOutput()
+		s.NoError(err, string(stdout))
+
+		pull := "cd pullPath; git pull origin master"
+		cmd = exec.Command("/bin/bash", "-c", pull)
+		cmd.Dir = dataDir
+		stdout, err = cmd.CombinedOutput()
+		s.NoError(err, string(stdout))
+
+		diff := "diff pullPath/a.txt pushPath/a.txt"
+		cmd = exec.Command("/bin/bash", "-c", diff)
+		cmd.Dir = dataDir
+		stdout, err = cmd.CombinedOutput()
+		s.NoError(err, string(stdout))
+	}
 }
