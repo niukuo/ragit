@@ -11,8 +11,8 @@ import (
 
 type Member = *member
 type member struct {
-	ID       PeerID
-	PeerURLs []string
+	ID       PeerID   `json:"id"`
+	PeerURLs []string `json:"peer_urls"`
 }
 
 func NewMember(id PeerID, peerURLs []string) Member {

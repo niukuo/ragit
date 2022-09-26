@@ -6,14 +6,13 @@ import (
 )
 
 type SnapshotData struct {
-	Refs    map[string]Hash
-	Members []Member
+	Refs    map[string]Hash `json:"refs"`
+	Members []Member        `json:"members"`
 }
 
 func DecodeSnapshot(data []byte) (*SnapshotData, error) {
 	var snapshotData SnapshotData
-	err := json.Unmarshal(data, &snapshotData)
-	if err != nil {
+	if err := json.Unmarshal(data, &snapshotData); err != nil {
 		return nil, fmt.Errorf("Unmarshal snapshotData failed, err: %w", err)
 	}
 
