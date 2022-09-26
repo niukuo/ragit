@@ -97,30 +97,26 @@ func (s *SMSuite) TestApply() {
 
 	s.NoError(s.storage.OnApply(2, 1, opAdd, context.Background()))
 
-	refsMap := make(map[string]refs.Hash)
-	membersSlice := make([]refs.Member, 3)
-	membersSlice[0] = refs.NewMember(refs.PeerID(111), []string{"127.0.0.1:2022"})
-	membersSlice[1] = refs.NewMember(refs.PeerID(222), []string{"127.0.0.2:2022"})
-	membersSlice[2] = refs.NewMember(refs.PeerID(333), []string{"127.0.0.3:2022"})
-	var refhashBranch2 refs.Hash
-	var valBranch2 []byte = []byte("1234567890abcdef1234")
-	copy(refhashBranch2[:], valBranch2)
-	refsMap["refs/heads/branch2"] = refhashBranch2
-	var refhashMaster refs.Hash
-	var valBranchMaster []byte = []byte("1234567890abcdef1234")
-	copy(refhashMaster[:], valBranchMaster)
-	refsMap["refs/heads/master"] = refhashMaster
+	var branch2, master refs.Hash
+	copy(branch2[:], "1234567890abcdef1234")
+	copy(master[:], "1234567890abcdef1234")
+
+	refsMap := map[string]refs.Hash{
+		"refs/heads/branch2": branch2,
+		"refs/heads/master":  master,
+	}
+
+	members := []refs.Member{
+		refs.NewMember(refs.PeerID(111), []string{"http://127.0.0.1:2022"}),
+		refs.NewMember(refs.PeerID(222), []string{"http://127.0.0.2:2022"}),
+		refs.NewMember(refs.PeerID(333), []string{"http://127.0.0.3:2022"}),
+	}
 
 	sData := &refs.SnapshotData{
 		Refs:    refsMap,
-		Members: membersSlice,
+		Members: members,
 	}
 
-	membersHttp := make([]refs.Member, 3)
-	membersHttp[0] = refs.NewMember(refs.PeerID(111), []string{"http://127.0.0.1:2022"})
-	membersHttp[1] = refs.NewMember(refs.PeerID(222), []string{"http://127.0.0.2:2022"})
-	membersHttp[2] = refs.NewMember(refs.PeerID(333), []string{"http://127.0.0.3:2022"})
-	sData.Members = membersHttp
 	expectData, err := refs.EncodeSnapshot(sData)
 	s.NoError(err)
 	snapshot, err = s.storage.Snapshot()
@@ -133,18 +129,17 @@ func (s *SMSuite) TestApply() {
 
 	sDecodeData, err := refs.DecodeSnapshot(snapshot.Data)
 	s.NoError(err)
-	s.EqualValues(sDecodeData.Members[2].PeerURLs, []string{"http://127.0.0.3:2022"})
-	s.EqualValues(len(sDecodeData.Members), 3)
-	s.EqualValues(sDecodeData.Refs["refs/heads/master"], refhashMaster)
+	s.Equal(sDecodeData.Members[2].PeerURLs, []string{"http://127.0.0.3:2022"})
+	s.Len(sDecodeData.Members, 3)
+	s.EqualValues(sDecodeData.Refs["refs/heads/master"], master)
 
 	s.NoError(s.storage.OnApply(3, 2, opUpdateRemove, context.Background()))
 
-	refsMap2 := make(map[string]refs.Hash)
-	var valBranchMaster2 []byte = []byte("1234567890abcdef1235")
-	var refhashMaster2 refs.Hash
-	copy(refhashMaster2[:], valBranchMaster2)
-	refsMap2["refs/heads/master"] = refhashMaster2
-	sData.Refs = refsMap2
+	refsMap = make(map[string]refs.Hash)
+	copy(master[:], "1234567890abcdef1235")
+	refsMap["refs/heads/master"] = master
+	sData.Refs = refsMap
+
 	expectData, err = refs.EncodeSnapshot(sData)
 	s.NoError(err)
 	snapshot, err = s.storage.Snapshot()
@@ -156,19 +151,20 @@ func (s *SMSuite) TestApply() {
 
 	sDecodeData, err = refs.DecodeSnapshot(snapshot.Data)
 	s.NoError(err)
-	s.EqualValues(sDecodeData.Refs["refs/heads/master"], refhashMaster2)
+	s.EqualValues(sDecodeData.Refs["refs/heads/master"], master)
 
 	confState = pb.ConfState{
 		Voters: []uint64{111, 222, 333, 444},
 	}
 
-	m := refs.NewMember(refs.PeerID(444), []string{"127.0.0.4:2022"})
-	member := []refs.Member{
+	m := refs.NewMember(refs.PeerID(444), []string{"http://127.0.0.4:2022"})
+	members = []refs.Member{
 		m,
 	}
 
-	s.NoError(s.storage.OnConfState(3, confState, member, pb.ConfChangeAddNode))
+	s.NoError(s.storage.OnConfState(3, confState, members, pb.ConfChangeAddNode))
 	s.checkIndex(3, 2)
+
 	memberURLs, err := s.storage.GetURLsByMemberID(refs.PeerID(111))
 	s.NoError(err)
 	s.Equal("http://127.0.0.1:2022", strings.Join(memberURLs, ","))
@@ -176,21 +172,23 @@ func (s *SMSuite) TestApply() {
 	confState = pb.ConfState{
 		Voters: []uint64{111, 222, 333},
 	}
-	s.NoError(s.storage.OnConfState(4, confState, member, pb.ConfChangeRemoveNode))
+	s.NoError(s.storage.OnConfState(4, confState, members, pb.ConfChangeRemoveNode))
 	s.checkIndex(4, 2)
 	_, err = s.storage.GetURLsByMemberID(refs.PeerID(444))
 	s.Error(err)
 
-	m3 := refs.NewMember(refs.PeerID(444), []string{"127.0.0.4:2022"})
+	m3 := refs.NewMember(refs.PeerID(444), []string{"http://127.0.0.4:2022"})
 	member3 := []refs.Member{
 		m3,
 	}
+
 	confState = pb.ConfState{
 		Voters:   []uint64{111, 222, 333},
 		Learners: []uint64{444},
 	}
 	s.NoError(s.storage.OnConfState(5, confState, member3, pb.ConfChangeAddLearnerNode))
 	s.checkIndex(5, 2)
+
 	memberURLs, err = s.storage.GetURLsByMemberID(refs.PeerID(333))
 	s.NoError(err)
 	s.Equal("http://127.0.0.3:2022", strings.Join(memberURLs, ","))
@@ -204,13 +202,12 @@ func (s *SMSuite) TestApply() {
 	s.Equal([]uint64{111, 222, 333}, confState.Voters)
 	s.Equal([]uint64{444}, confState.Learners)
 
-	var refhash1 refs.Hash
-	var val1 []byte = []byte("3132333435363738393061626364656631323335")
-	copy(refhash1[:], val1)
-	refsMap3 := make(map[string]refs.Hash)
-	refsMap3["refs/heads/branch1"] = refhash1
-	sData.Refs = refsMap3
-	sData.Members = append(sData.Members, refs.NewMember(refs.PeerID(444), []string{"127.0.0.4:2022"}))
+	refsMap = make(map[string]refs.Hash)
+	var branch1 refs.Hash
+	copy(branch1[:], "3132333435363738393061626364656631323335")
+	refsMap["refs/heads/branch1"] = branch1
+	sData.Refs = refsMap
+	sData.Members = append(sData.Members, refs.NewMember(refs.PeerID(444), []string{"http://127.0.0.4:2022"}))
 
 	snapshot.Data, err = refs.EncodeSnapshot(sData)
 	s.NoError(err)
@@ -219,28 +216,28 @@ func (s *SMSuite) TestApply() {
 	testObjSrcId := refs.PeerID(12345678)
 	s.Error(s.storage.OnSnapshot(snapshot, testObjSrcId))
 
-	membersHttp1 := make([]refs.Member, 4)
-	membersHttp1[0] = refs.NewMember(refs.PeerID(111), []string{"http://127.0.0.1:2022"})
-	membersHttp1[1] = refs.NewMember(refs.PeerID(222), []string{"http://127.0.0.2:2022"})
-	membersHttp1[2] = refs.NewMember(refs.PeerID(333), []string{"http://127.0.0.3:2022"})
-	membersHttp1[3] = refs.NewMember(refs.PeerID(444), []string{"http://127.0.0.4:2022"})
-	sData.Members = membersHttp1
+	members = []refs.Member{
+		refs.NewMember(refs.PeerID(111), []string{"http://127.0.0.1:2022"}),
+		refs.NewMember(refs.PeerID(222), []string{"http://127.0.0.2:2022"}),
+		refs.NewMember(refs.PeerID(333), []string{"http://127.0.0.3:2022"}),
+		refs.NewMember(refs.PeerID(444), []string{"http://127.0.0.4:2022"}),
+	}
+	sData.Members = members
 	snapshot.Data, err = refs.EncodeSnapshot(sData)
 	s.NoError(err)
 	snapshot.Metadata.ConfState = confState
 	s.NoError(s.storage.OnSnapshot(snapshot, refs.PeerID(111)))
 
 	curSnap, err := s.storage.Snapshot()
+	s.NoError(err)
 	s.Equal(string(snapshot.Data), string(curSnap.Data))
 	s.Equal(snapshot.Metadata, curSnap.Metadata)
 	sDecodeData, err = refs.DecodeSnapshot(snapshot.Data)
 	s.NoError(err)
-	s.EqualValues(sDecodeData.Refs["refs/heads/branch1"], refhash1)
+	s.EqualValues(sDecodeData.Refs["refs/heads/branch1"], branch1)
 
-	var refhash2 refs.Hash
-	var val2 []byte = []byte("3132333435363738393061626364656631323334")
-	copy(refhash2[:], val2)
-	sData.Refs["refs/heads/master"] = refhash2
+	copy(branch2[:], "3132333435363738393061626364656631323334")
+	sData.Refs["refs/heads/master"] = branch2
 	sort.Slice(sData.Members, func(i, j int) bool {
 		return sData.Members[i].ID < sData.Members[j].ID
 	})
@@ -251,9 +248,10 @@ func (s *SMSuite) TestApply() {
 	s.NoError(s.storage.OnSnapshot(snapshot, refs.PeerID(111)))
 
 	curSnap, err = s.storage.Snapshot()
+	s.NoError(err)
 	s.Equal(string(snapshot.Data), string(curSnap.Data))
 	s.Equal(snapshot.Metadata, curSnap.Metadata)
 	sDecodeData, err = refs.DecodeSnapshot(snapshot.Data)
 	s.NoError(err)
-	s.EqualValues(sDecodeData.Refs["refs/heads/master"], refhash2)
+	s.EqualValues(sDecodeData.Refs["refs/heads/master"], branch2)
 }
