@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 
 	"go.etcd.io/etcd/raft"
 )
@@ -42,27 +41,20 @@ func (s Status) MemberStatus(
 	getMemberURLs func() (map[PeerID][]string, error),
 ) (*MemberStatus, error) {
 
-	// TODO: refactor member output
 	memberURLs, err := getMemberURLs()
 	if err != nil {
 		return nil, err
 	}
 
-	var leaderURLs []string
-	if s.Lead != 0 {
-		leaderURLs = memberURLs[PeerID(s.Lead)]
-	}
-
-	idURLs := memberURLs[PeerID(s.ID)]
-
 	mstatus := &MemberStatus{
-		ID:        strings.Join(idURLs, ","),
-		Lead:      strings.Join(leaderURLs, ","),
+		ID:        PeerID(s.ID).String(),
+		Lead:      PeerID(s.Lead).String(),
 		Commit:    s.Commit,
 		RaftState: s.RaftState.String(),
+
+		Progress: make(map[string]Tracker),
+		Members:  make(map[string][]string),
 	}
-	mstatus.Progress = make(map[string]Tracker, 0)
-	mstatus.Members = make(map[string][]string)
 
 	for k, v := range s.Progress {
 		tracker := Tracker{
@@ -71,14 +63,11 @@ func (s Status) MemberStatus(
 			State:     v.State.String(),
 			IsLearner: v.IsLearner,
 		}
+		mstatus.Progress[PeerID(k).String()] = tracker
+	}
 
-		us, ok := memberURLs[PeerID(k)]
-		if !ok {
-			return nil, fmt.Errorf("id: %s not found in members: %v",
-				PeerID(k), memberURLs)
-		}
-		mstatus.Progress[strings.Join(us, ",")] = tracker
-		mstatus.Members[PeerID(k).String()] = us
+	for id, us := range memberURLs {
+		mstatus.Members[id.String()] = us
 	}
 
 	return mstatus, nil
