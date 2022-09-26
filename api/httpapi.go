@@ -130,7 +130,7 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		now := time.Now()
-		memberID := refs.ComputePeerID(ccParams.PeerUrls, &now)
+		memberID := refs.NewMemberID(ccParams.PeerUrls, &now)
 
 		var typ raftpb.ConfChangeType
 		switch action := r.URL.Query().Get("action"); action {

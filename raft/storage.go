@@ -13,8 +13,9 @@ type InitialState struct {
 
 	ConfState pb.ConfState
 	ConfIndex uint64
-	LocalID   uint64
-	Members   []*refs.Member
+
+	LocalID uint64
+	Members []refs.Member
 }
 
 type Storage interface {

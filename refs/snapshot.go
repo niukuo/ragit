@@ -7,7 +7,7 @@ import (
 
 type SnapshotData struct {
 	Refs    map[string]Hash
-	Members []*Member
+	Members []Member
 }
 
 func DecodeSnapshot(data []byte) (*SnapshotData, error) {

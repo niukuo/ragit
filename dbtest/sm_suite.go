@@ -98,7 +98,7 @@ func (s *SMSuite) TestApply() {
 	s.NoError(s.storage.OnApply(2, 1, opAdd, context.Background()))
 
 	refsMap := make(map[string]refs.Hash)
-	membersSlice := make([]*refs.Member, 3)
+	membersSlice := make([]refs.Member, 3)
 	membersSlice[0] = refs.NewMember(refs.PeerID(111), []string{"127.0.0.1:2022"})
 	membersSlice[1] = refs.NewMember(refs.PeerID(222), []string{"127.0.0.2:2022"})
 	membersSlice[2] = refs.NewMember(refs.PeerID(333), []string{"127.0.0.3:2022"})
@@ -116,7 +116,7 @@ func (s *SMSuite) TestApply() {
 		Members: membersSlice,
 	}
 
-	membersHttp := make([]*refs.Member, 3)
+	membersHttp := make([]refs.Member, 3)
 	membersHttp[0] = refs.NewMember(refs.PeerID(111), []string{"http://127.0.0.1:2022"})
 	membersHttp[1] = refs.NewMember(refs.PeerID(222), []string{"http://127.0.0.2:2022"})
 	membersHttp[2] = refs.NewMember(refs.PeerID(333), []string{"http://127.0.0.3:2022"})
@@ -133,7 +133,7 @@ func (s *SMSuite) TestApply() {
 
 	sDecodeData, err := refs.DecodeSnapshot(snapshot.Data)
 	s.NoError(err)
-	s.EqualValues(sDecodeData.Members[2].PeerAddrs, []string{"http://127.0.0.3:2022"})
+	s.EqualValues(sDecodeData.Members[2].PeerURLs, []string{"http://127.0.0.3:2022"})
 	s.EqualValues(len(sDecodeData.Members), 3)
 	s.EqualValues(sDecodeData.Refs["refs/heads/master"], refhashMaster)
 
@@ -163,7 +163,7 @@ func (s *SMSuite) TestApply() {
 	}
 
 	m := refs.NewMember(refs.PeerID(444), []string{"127.0.0.4:2022"})
-	member := []*refs.Member{
+	member := []refs.Member{
 		m,
 	}
 
@@ -182,7 +182,7 @@ func (s *SMSuite) TestApply() {
 	s.Error(err)
 
 	m3 := refs.NewMember(refs.PeerID(444), []string{"127.0.0.4:2022"})
-	member3 := []*refs.Member{
+	member3 := []refs.Member{
 		m3,
 	}
 	confState = pb.ConfState{
@@ -219,7 +219,7 @@ func (s *SMSuite) TestApply() {
 	testObjSrcId := refs.PeerID(12345678)
 	s.Error(s.storage.OnSnapshot(snapshot, testObjSrcId))
 
-	membersHttp1 := make([]*refs.Member, 4)
+	membersHttp1 := make([]refs.Member, 4)
 	membersHttp1[0] = refs.NewMember(refs.PeerID(111), []string{"http://127.0.0.1:2022"})
 	membersHttp1[1] = refs.NewMember(refs.PeerID(222), []string{"http://127.0.0.2:2022"})
 	membersHttp1[2] = refs.NewMember(refs.PeerID(333), []string{"http://127.0.0.3:2022"})

@@ -62,9 +62,9 @@ func TestRepeatPushPull(t *testing.T) {
 }
 
 func startRagit(s *assert.Assertions, dir, localAddr, peerAddrs string) (raft.Node, bdb.Storage, *http.Server) {
-	myid := refs.ComputePeerID([]string{localAddr}, nil)
+	myid := refs.NewMemberID([]string{localAddr}, nil)
 	peers := make([]raft.PeerID, 0)
-	id := refs.ComputePeerID([]string{peerAddrs}, nil)
+	id := refs.NewMemberID([]string{peerAddrs}, nil)
 	peers = append(peers, id)
 
 	os.RemoveAll(dir)
@@ -74,17 +74,17 @@ func startRagit(s *assert.Assertions, dir, localAddr, peerAddrs string) (raft.No
 	opts.Listener = listener
 	opts.Logger = logging.GetLogger("")
 	storage, err := bdb.Open(dir, opts, func() (refs.PeerID, error) {
-		localID := refs.ComputePeerID([]string{localAddr}, nil)
+		localID := refs.NewMemberID([]string{localAddr}, nil)
 		return localID, nil
 	})
 	s.NoError(err)
 	if hardState, confState, err := storage.InitialState(); err != nil {
 		s.NoError(err)
 	} else if etcdraft.IsEmptyHardState(hardState) && len(confState.Learners)+len(confState.Voters) == 0 {
-		members := make([]*refs.Member, 0)
+		members := make([]refs.Member, 0)
 		peerAddrs := strings.Split(peerAddrs, ",")
 		for _, addr := range peerAddrs {
-			memberID := refs.ComputePeerID([]string{addr}, nil)
+			memberID := refs.NewMemberID([]string{addr}, nil)
 			members = append(members, refs.NewMember(memberID, []string{addr}))
 		}
 		err := storage.Bootstrap(members)

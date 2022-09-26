@@ -48,7 +48,7 @@ func TestSM(t *testing.T) {
 		m1 := refs.NewMember(refs.PeerID(111), []string{"http://127.0.0.1:2022"})
 		m2 := refs.NewMember(refs.PeerID(222), []string{"http://127.0.0.2:2022"})
 		m3 := refs.NewMember(refs.PeerID(333), []string{"http://127.0.0.3:2022"})
-		members := []*refs.Member{
+		members := []refs.Member{
 			m1,
 			m2,
 			m3,

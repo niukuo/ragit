@@ -28,7 +28,7 @@ func TestGetChangeMembers(t *testing.T) {
 	s.Len(m1, 1)
 	for _, m := range m1 {
 		s.EqualValues(m.ID, refs.PeerID(123))
-		s.EqualValues(m.PeerAddrs, []string{"http://127.0.0.1:2022"})
+		s.EqualValues(m.PeerURLs, []string{"http://127.0.0.1:2022"})
 	}
 
 	cc.Type = pb.ConfChangeAddLearnerNode
@@ -38,7 +38,7 @@ func TestGetChangeMembers(t *testing.T) {
 	s.Len(m2, 1)
 	for _, m := range m2 {
 		s.EqualValues(m.ID, refs.PeerID(123))
-		s.EqualValues(m.PeerAddrs, []string{"http://127.0.0.1:2022"})
+		s.EqualValues(m.PeerURLs, []string{"http://127.0.0.1:2022"})
 	}
 
 	cc.Type = pb.ConfChangeUpdateNode
@@ -48,7 +48,7 @@ func TestGetChangeMembers(t *testing.T) {
 	s.Len(m3, 1)
 	for _, m := range m3 {
 		s.EqualValues(m.ID, refs.PeerID(123))
-		s.EqualValues(m.PeerAddrs, []string{"http://127.0.0.1:2022"})
+		s.EqualValues(m.PeerURLs, []string{"http://127.0.0.1:2022"})
 	}
 
 	cc.Type = pb.ConfChangeRemoveNode
@@ -59,7 +59,7 @@ func TestGetChangeMembers(t *testing.T) {
 	s.Len(m4, 1)
 	for _, m := range m4 {
 		s.EqualValues(m.ID, refs.PeerID(123))
-		s.Nil(m.PeerAddrs)
+		s.Nil(m.PeerURLs)
 	}
 
 	cc.Type = pb.ConfChangeRemoveNode
@@ -70,6 +70,6 @@ func TestGetChangeMembers(t *testing.T) {
 	s.Len(m5, 1)
 	for _, m := range m5 {
 		s.EqualValues(m.ID, refs.PeerID(123))
-		s.Nil(m.PeerAddrs)
+		s.Nil(m.PeerURLs)
 	}
 }

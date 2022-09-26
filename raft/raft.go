@@ -90,11 +90,7 @@ func NewRaft(config Config,
 
 		requests: NewRequestContextManager(),
 
-		newMemberID: func(addr []string) refs.PeerID {
-			now := time.Now()
-			memberID := refs.ComputePeerID(addr, &now)
-			return memberID
-		},
+		newMemberID: refs.DefaultNewMemberID,
 
 		raftLogger:  raftLogger,
 		eventLogger: eventLogger,

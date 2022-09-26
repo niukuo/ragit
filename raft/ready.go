@@ -504,8 +504,8 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 		case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
 			if cc.NodeID != uint64(rc.id) {
 				for _, m := range members {
-					rc.transport.AddPeer(types.ID(cc.NodeID), m.PeerAddrs)
-					rc.raftLogger.Infof("transport.AddPeer of id %v", m.PeerAddrs)
+					rc.transport.AddPeer(types.ID(cc.NodeID), m.PeerURLs)
+					rc.raftLogger.Infof("transport.AddPeer of id %v", m.PeerURLs)
 				}
 			}
 		case pb.ConfChangeRemoveNode:
@@ -527,15 +527,13 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 	return nil
 }
 
-func getChangeMembers(cc pb.ConfChange) ([]*refs.Member, error) {
+func getChangeMembers(cc pb.ConfChange) ([]refs.Member, error) {
 	var m refs.Member
 	if cc.Type == pb.ConfChangeRemoveNode {
 		if len(cc.Context) != 0 {
 			return nil, errors.New("remove node cc context not nil")
 		}
-		m = refs.Member{
-			ID: refs.PeerID(cc.NodeID),
-		}
+		m = refs.NewMember(refs.PeerID(cc.NodeID), nil)
 	} else {
 		dec := json.NewDecoder(strings.NewReader(string(cc.Context)))
 		dec.DisallowUnknownFields()
@@ -544,9 +542,9 @@ func getChangeMembers(cc pb.ConfChange) ([]*refs.Member, error) {
 			return nil, err
 		}
 	}
-	members := []*refs.Member{
-		&m,
-	}
+
+	members := []refs.Member{m}
+
 	return members, nil
 }
 

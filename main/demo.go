@@ -25,11 +25,11 @@ func main() {
 
 	flag.Parse()
 
-	myid := refs.ComputePeerID([]string{*LocalAddr}, nil)
+	myid := refs.NewMemberID([]string{*LocalAddr}, nil)
 
 	peers := make([]raft.PeerID, 0)
 	for _, peerAddr := range strings.Split(*LocalAddr, ",") {
-		id := refs.ComputePeerID([]string{peerAddr}, nil)
+		id := refs.NewMemberID([]string{peerAddr}, nil)
 		peers = append(peers, id)
 	}
 
@@ -52,10 +52,10 @@ func main() {
 	if hardState, confState, err := storage.InitialState(); err != nil {
 		log.Fatalln(err)
 	} else if etcdraft.IsEmptyHardState(hardState) && len(confState.Learners)+len(confState.Voters) == 0 {
-		members := make([]*refs.Member, 0)
+		members := make([]refs.Member, 0)
 		peerAddrs := strings.Split(*PeerAddrs, ",")
 		for _, addr := range peerAddrs {
-			memberID := refs.ComputePeerID([]string{addr}, nil)
+			memberID := refs.NewMemberID([]string{addr}, nil)
 			members = append(members, refs.NewMember(memberID, []string{addr}))
 		}
 		if err := storage.Bootstrap(members); err != nil {
@@ -102,7 +102,7 @@ func LogHandler(def http.Handler) http.Handler {
 }
 
 func getLocalID() (refs.PeerID, error) {
-	localID := refs.ComputePeerID([]string{*LocalAddr}, nil)
+	localID := refs.NewMemberID([]string{*LocalAddr}, nil)
 
 	return localID, nil
 }

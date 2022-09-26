@@ -14,7 +14,7 @@ type StateMachine interface {
 	OnLeaderStop()
 
 	OnApply(term, index uint64, oplog refs.Oplog, handle refs.ReqHandle) error
-	OnConfState(index uint64, confState pb.ConfState, member []*refs.Member, opType pb.ConfChangeType) error
+	OnConfState(index uint64, confState pb.ConfState, members []refs.Member, opType pb.ConfChangeType) error
 
 	OnSnapshot(snapshot pb.Snapshot, srcId PeerID) error
 
