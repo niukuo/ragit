@@ -64,8 +64,8 @@ func NewOptions() *Options {
 	return o
 }
 
-type memberInDB struct {
-	PeerAddrs []string
+type memberAttributes struct {
+	PeerURLs []string `json:"peer_urls"`
 }
 
 func Open(path string,
@@ -235,12 +235,11 @@ func getAllMembers(membersb *bbolt.Bucket) ([]refs.Member, error) {
 	members := make([]refs.Member, 0)
 	if err := membersb.ForEach(func(k, v []byte) error {
 		mID := refs.PeerID(binary.BigEndian.Uint64(k))
-		var mInDB memberInDB
-		err := json.Unmarshal(v, &mInDB)
-		if err != nil {
+		var attr memberAttributes
+		if err := json.Unmarshal(v, &attr); err != nil {
 			return err
 		}
-		members = append(members, refs.NewMember(mID, mInDB.PeerAddrs))
+		members = append(members, refs.NewMember(mID, attr.PeerURLs))
 		return nil
 	}); err != nil {
 		return nil, err
@@ -322,7 +321,7 @@ func (s *storage) Save(
 
 func (s *storage) GetURLsByMemberID(id refs.PeerID) ([]string, error) {
 
-	peerURLs := make([]string, 0)
+	var peerURLs []string
 
 	if err := s.db.View(func(tx *bbolt.Tx) error {
 		membersb := tx.Bucket(BucketMembers)
@@ -335,12 +334,12 @@ func (s *storage) GetURLsByMemberID(id refs.PeerID) ([]string, error) {
 			return ErrMemberIDNotFound
 		}
 
-		var attr memberInDB
+		var attr memberAttributes
 		if err := json.Unmarshal(v, &attr); err != nil {
 			return err
 		}
 
-		peerURLs = attr.PeerAddrs
+		peerURLs = attr.PeerURLs
 
 		return nil
 
@@ -381,8 +380,10 @@ func saveMembers(s *storage, membersb *bbolt.Bucket, members []refs.Member, conf
 		for _, m := range members {
 			var key [8]byte
 			binary.BigEndian.PutUint64(key[:], uint64(m.ID))
-			mInDB := memberInDB{PeerAddrs: m.PeerURLs}
-			val, err := json.Marshal(mInDB)
+			attr := memberAttributes{
+				PeerURLs: m.PeerURLs,
+			}
+			val, err := json.Marshal(attr)
 			if err != nil {
 				return err
 			}
