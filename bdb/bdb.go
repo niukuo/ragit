@@ -1064,6 +1064,21 @@ func (s *storage) Describe(w io.Writer) {
 
 			fmt.Fprintln(w, "snapshot_term:", term)
 			fmt.Fprintln(w, "snapshot_index:", index)
+
+			memberURLs, err := s.GetAllMemberURLs()
+			if err != nil {
+				return err
+			}
+			strMemberURLs := make(map[string][]string, len(memberURLs))
+			for id, us := range memberURLs {
+				strMemberURLs[id.String()] = us
+			}
+
+			fmt.Fprint(w, "members: ")
+			enc := json.NewEncoder(w)
+			enc.SetEscapeHTML(false)
+			enc.SetIndent("", "  ")
+			enc.Encode(strMemberURLs)
 		}
 
 		return nil
