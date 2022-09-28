@@ -27,10 +27,11 @@ func TestNewMemberID(t *testing.T) {
 	s.NotEqual(id3, id4)
 }
 
-func TestString(t *testing.T) {
+func TestPeerID(t *testing.T) {
 	s := assert.New(t)
 	id := PeerID(1234)
 
 	s.True(strings.Contains(id.String(), "0"))
 	s.EqualValues(len(id.String()), 16)
+	s.Equal("00000000000004d2", id.String())
 }

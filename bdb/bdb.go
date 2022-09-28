@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -206,6 +207,28 @@ func convertToMembers(s *storage, tx *bbolt.Tx) error {
 	return nil
 }
 
+// Compatible with older version id
+// +--------+------------+---------+
+// | 32 bit |   16 bit   |  16 bit |
+// +--------+------------+---------+
+// | IPv4   |   0(index) |   port  |
+// +--------+------------+---------+
+func ipv4ToHttpAddr(id uint64) string {
+
+	ip := uint32(id >> 32)
+
+	ipv4 := net.IPv4(
+		byte(ip),
+		byte(ip>>8),
+		byte(ip>>16),
+		byte(ip>>24),
+	)
+
+	port := uint16(id)
+
+	return fmt.Sprintf("http://%s:%v", ipv4, port)
+}
+
 func getMembersByConfState(tx *bbolt.Tx) ([]refs.Member, error) {
 	metab := tx.Bucket(BucketMeta)
 	var confState pb.ConfState
@@ -217,7 +240,7 @@ func getMembersByConfState(tx *bbolt.Tx) ([]refs.Member, error) {
 	members := make([]refs.Member, len(confMembers))
 	for idx, cMemberID := range confMembers {
 		id := refs.PeerID(cMemberID)
-		m := refs.NewMember(refs.PeerID(cMemberID), []string{fmt.Sprintf("http://%v:%v", uint32(id>>32), uint16(id))})
+		m := refs.NewMember(id, []string{ipv4ToHttpAddr(cMemberID)})
 		members[idx] = m
 	}
 
