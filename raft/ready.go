@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -34,9 +33,6 @@ type ReadyHandler interface {
 
 	ReadyC() chan<- <-chan *raft.Ready
 	AdvanceC() <-chan struct{}
-
-	GetAllMemberURLs() (map[PeerID][]string, error)
-	GetURLsByMemberID(id PeerID) ([]string, error)
 }
 
 type readIndexState struct {
@@ -70,6 +66,8 @@ type readyHandler struct {
 
 	executor  Executor
 	confIndex uint64
+
+	ClusterServer
 
 	Runner
 
@@ -130,6 +128,16 @@ func RunNode(c Config,
 		return nil, err
 	}
 
+	clusterServer := NewClusterServer(ServerConfig{
+		clusterId: c.ClusterID,
+		id:        id,
+
+		storage: c.Storage,
+		raft:    r,
+
+		newMemberID: refs.DefaultNewMemberID,
+	})
+
 	rc := &readyHandler{
 		id: id,
 
@@ -152,6 +160,8 @@ func RunNode(c Config,
 
 		executor:  executor,
 		confIndex: state.ConfIndex,
+
+		ClusterServer: clusterServer,
 
 		raftLogger:  logging.GetLogger("ready"),
 		eventLogger: logging.GetLogger("event.ready"),
@@ -512,38 +522,60 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 			return err
 		}
 
-		confState, err := rc.raft.applyConfChange(cc)
-		if err != nil {
-			return err
-		}
+		applyConfChange := func() error {
+			req, err := rc.raft.getContext(entry.Term, entry.Index)
+			if err != nil {
+				return err
+			}
 
-		members, err := getChangeMembers(cc)
-		if err != nil {
-			return err
-		}
+			if req != nil {
+				defer func() { req.fire(err) }()
+			}
 
-		if err := rc.executor.OnConfState(entry.Index,
-			*confState, members, cc.Type); err != nil {
-			return err
-		}
+			members, err := rc.checkAndGetChangeMembers(cc)
+			if err != nil {
+				// The configuration change may be cancelled at this point
+				// by setting the NodeID field to zero before calling ApplyConfChange
+				cc.NodeID = raft.None
+				rc.raft.applyConfChange(cc)
+				return nil
+			}
 
-		switch typ := cc.Type; typ {
-		case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
-			if cc.NodeID != uint64(rc.id) {
-				for _, m := range members {
-					rc.transport.AddPeer(types.ID(cc.NodeID), m.PeerURLs)
-					rc.raftLogger.Infof("transport.AddPeer of id %v", m.PeerURLs)
+			confState, err := rc.raft.applyConfChange(cc)
+			if err != nil {
+				return err
+			}
+
+			if err = rc.executor.OnConfState(entry.Index,
+				*confState, members, cc.Type); err != nil {
+				return err
+			}
+
+			switch typ := cc.Type; typ {
+			case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
+				if cc.NodeID != uint64(rc.id) {
+					for _, m := range members {
+						rc.transport.AddPeer(types.ID(cc.NodeID), m.PeerURLs)
+						rc.raftLogger.Infof("transport.AddPeer of id %s, peer_urls: %v",
+							types.ID(cc.NodeID), m.PeerURLs)
+					}
 				}
+			case pb.ConfChangeRemoveNode:
+				if cc.NodeID == uint64(rc.id) {
+					rc.mayTransferLeader()
+				} else if rc.transport.Get(types.ID(cc.NodeID)) != nil {
+					rc.transport.RemovePeer(types.ID(cc.NodeID))
+					rc.raftLogger.Infof("transport.RemovePeer of id %s", types.ID(cc.NodeID))
+				}
+			default:
+				return fmt.Errorf("unsupported conf change type %s", typ)
 			}
-		case pb.ConfChangeRemoveNode:
-			if cc.NodeID == uint64(rc.id) {
-				rc.mayTransferLeader()
-			} else if rc.transport.Get(types.ID(cc.NodeID)) != nil {
-				rc.transport.RemovePeer(types.ID(cc.NodeID))
-				rc.raftLogger.Infof("transport.RemovePeer of id %s", cc.NodeID)
-			}
-		default:
-			return fmt.Errorf("unsupported conf change type %s", typ)
+
+			return nil
+		}
+
+		if err := applyConfChange(); err != nil {
+			return err
 		}
 
 		atomic.StoreUint64(&rc.confIndex, entry.Index)
@@ -554,23 +586,90 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 	return nil
 }
 
-func getChangeMembers(cc pb.ConfChange) ([]refs.Member, error) {
-	var m refs.Member
-	if cc.Type == pb.ConfChangeRemoveNode {
-		if len(cc.Context) != 0 {
-			return nil, errors.New("remove node cc context not nil")
-		}
-		m = refs.NewMember(refs.PeerID(cc.NodeID), nil)
-	} else {
-		dec := json.NewDecoder(strings.NewReader(string(cc.Context)))
-		dec.DisallowUnknownFields()
-		err := dec.Decode(&m)
-		if err != nil {
-			return nil, err
-		}
+func (rc *readyHandler) checkAndGetChangeMembers(cc pb.ConfChange) ([]refs.Member, error) {
+
+	id := refs.PeerID(cc.NodeID)
+
+	memberURLs, err := rc.storage.GetAllMemberURLs()
+	if err != nil {
+		return nil, err
 	}
 
-	members := []refs.Member{m}
+	var members []refs.Member
+
+	switch cc.Type {
+	case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
+
+		if len(cc.Context) == 0 {
+			return nil, errors.New("ConfChangeAdd(Learner)Node Context cannot be empty")
+		}
+
+		var confChangeContext ConfChangeContext
+		if err := json.Unmarshal(cc.Context, &confChangeContext); err != nil {
+			return nil, err
+		}
+
+		if confChangeContext.IsPromote {
+
+			if cc.Type != pb.ConfChangeAddNode {
+				return nil, fmt.Errorf("promote: type mismatch: %s", cc.Type)
+			}
+			if _, ok := memberURLs[id]; !ok {
+				return nil, fmt.Errorf("member id: %s not found", id)
+			}
+
+			confState, err := rc.storage.GetConfState()
+			if err != nil {
+				return nil, err
+			}
+
+			isLearner := false
+			for _, learnerID := range confState.Learners {
+				if id == PeerID(learnerID) {
+					isLearner = true
+					break
+				}
+			}
+
+			if !isLearner {
+				return nil, fmt.Errorf("can only promote a learner member: %s", id)
+			}
+
+		} else {
+			if _, ok := memberURLs[id]; ok {
+				return nil, fmt.Errorf("member id: %s already exist", id)
+			}
+
+			urls := make(map[string]bool)
+			for _, us := range memberURLs {
+				for _, u := range us {
+					urls[u] = true
+				}
+			}
+
+			for _, u := range confChangeContext.PeerURLs {
+				if urls[u] {
+					return nil, fmt.Errorf("peerURL: %s already exist", u)
+				}
+			}
+
+			members = append(members, confChangeContext.Member)
+		}
+
+	case pb.ConfChangeRemoveNode:
+		if len(cc.Context) != 0 {
+			return nil, fmt.Errorf("ConfChangeRemoveNode Context: %s should be empty", cc.Context)
+		}
+
+		if _, ok := memberURLs[id]; !ok {
+			return nil, fmt.Errorf("member id: %s not found", id)
+		}
+
+		members = append(members, refs.NewMember(id, nil))
+
+	default:
+		return nil, fmt.Errorf("unsupported conf change type: %s", cc.Type)
+	}
 
 	return members, nil
 }
@@ -636,7 +735,12 @@ func (rc *readyHandler) InitRouter(mux *http.ServeMux) {
 	mux.HandleFunc("/raft/snapshot", rc.getSnapshot)
 	mux.HandleFunc("/raft/server_stat", rc.getServerStat)
 	mux.HandleFunc("/raft/leader_stat", rc.getLeaderStat)
+	mux.HandleFunc("/raft/members", rc.getMemberStatus)
 	rc.raft.InitRouter(mux)
+}
+
+func (rc *readyHandler) Service() ClusterServer {
+	return rc.ClusterServer
 }
 
 func (rc *readyHandler) getSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -741,6 +845,27 @@ func (rc *readyHandler) proposeReadIndex() *readIndexState {
 	}
 
 	return state
+}
+
+func (rc *readyHandler) getMemberStatus(w http.ResponseWriter, r *http.Request) {
+	var memberStatus *MemberStatus
+
+	if err := rc.raft.withPipeline(r.Context(), func(node *raft.RawNode) error {
+		var errStatus error
+		memberStatus, errStatus = (Status)(node.Status()).MemberStatus(rc.GetAllMemberURLs)
+		if errStatus != nil {
+			return errStatus
+		}
+		return nil
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	encoder.Encode(memberStatus)
 }
 
 func (rc *readyHandler) ReadIndex(ctx context.Context) (uint64, error) {

@@ -22,6 +22,7 @@ type TxIniter func(
 // A key-value stream backed by raft
 type Node interface {
 	Handler() http.Handler
+	Service() ClusterServer
 	InitRouter(mux *http.ServeMux)
 	GetStatus(ctx context.Context) (*Status, error)
 	ReadIndex(ctx context.Context) (uint64, error)

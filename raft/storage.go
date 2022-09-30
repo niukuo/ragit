@@ -29,6 +29,8 @@ type Storage interface {
 	GetAllMemberURLs() (map[PeerID][]string, error)
 	GetURLsByMemberID(id PeerID) ([]string, error)
 
+	GetConfState() (*pb.ConfState, error)
+
 	Describe(w io.Writer)
 
 	OnConfIndexChange(confIndex uint64)

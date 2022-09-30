@@ -9,67 +9,115 @@ import (
 	pb "go.etcd.io/etcd/raft/raftpb"
 )
 
-func TestGetChangeMembers(t *testing.T) {
+func TestCheckAndGetChangeMembers(t *testing.T) {
 	s := assert.New(t)
 
+	mockStore := &MockStorage{}
+	rh := &readyHandler{
+		storage: mockStore,
+	}
+
+	// add learner
+	mockStore.On("GetAllMemberURLs").Return(map[PeerID][]string{}, nil).Once()
 	cc := pb.ConfChange{
-		Type:   pb.ConfChangeAddNode,
+		Type:   pb.ConfChangeAddLearnerNode,
 		NodeID: uint64(123),
 	}
-
-	member := refs.NewMember(123, []string{"http://127.0.0.1:2022"})
-	mb, err := json.Marshal(member)
+	confChangeContext := ConfChangeContext{
+		Member:    refs.NewMember(123, []string{"http://127.0.0.1:2022"}),
+		IsPromote: false,
+	}
+	ctxb, err := json.Marshal(confChangeContext)
 	s.NoError(err)
-	cc.Context = mb
+	cc.Context = ctxb
 
-	members, err := getChangeMembers(cc)
+	members, err := rh.checkAndGetChangeMembers(cc)
 	s.NoError(err)
-	s.NotNil(members)
 	s.Len(members, 1)
-	for _, m := range members {
-		s.EqualValues(m.ID, refs.PeerID(123))
-		s.EqualValues(m.PeerURLs, []string{"http://127.0.0.1:2022"})
+	s.Equal(refs.PeerID(123), members[0].ID)
+	s.Equal([]string{"http://127.0.0.1:2022"}, members[0].PeerURLs)
+
+	mockStore.On("GetAllMemberURLs").Return(map[PeerID][]string{
+		PeerID(123): {"http://127.0.0.1:2022"},
+	}, nil).Once()
+	_, err = rh.checkAndGetChangeMembers(cc)
+	s.Error(err)
+
+	// promote
+	mockStore.On("GetAllMemberURLs").Return(map[PeerID][]string{
+		PeerID(123): {"http://127.0.0.1:2022"},
+	}, nil).Twice()
+
+	mockStore.On("GetConfState").Return(&pb.ConfState{
+		Learners: []uint64{},
+	}, nil).Once()
+
+	confChangeContext.IsPromote = true
+	ctxWithPromote, err := json.Marshal(confChangeContext)
+	s.NoError(err)
+
+	cc = pb.ConfChange{
+		Type:    pb.ConfChangeAddNode,
+		NodeID:  uint64(123),
+		Context: ctxWithPromote,
 	}
 
-	cc.Type = pb.ConfChangeAddLearnerNode
-	members, err = getChangeMembers(cc)
-	s.NoError(err)
-	s.NotNil(members)
-	s.Len(members, 1)
-	for _, m := range members {
-		s.EqualValues(m.ID, refs.PeerID(123))
-		s.EqualValues(m.PeerURLs, []string{"http://127.0.0.1:2022"})
+	_, err = rh.checkAndGetChangeMembers(cc)
+	s.Error(err)
+
+	mockStore.On("GetConfState").Return(&pb.ConfState{
+		Learners: []uint64{123},
+	}, nil).Once()
+
+	cc = pb.ConfChange{
+		Type:    pb.ConfChangeAddNode,
+		NodeID:  uint64(123),
+		Context: ctxWithPromote,
 	}
 
-	cc.Type = pb.ConfChangeUpdateNode
-	members, err = getChangeMembers(cc)
+	members, err = rh.checkAndGetChangeMembers(cc)
 	s.NoError(err)
-	s.NotNil(members)
-	s.Len(members, 1)
-	for _, m := range members {
-		s.Equal(m.ID, refs.PeerID(123))
-		s.Equal(m.PeerURLs, []string{"http://127.0.0.1:2022"})
+	s.Len(members, 0)
+
+	// add
+	mockStore.On("GetAllMemberURLs").Return(map[PeerID][]string{}, nil).Once()
+	cc = pb.ConfChange{
+		Type:    pb.ConfChangeAddNode,
+		NodeID:  uint64(123),
+		Context: ctxb,
 	}
 
-	cc.Type = pb.ConfChangeRemoveNode
-	cc.Context = nil
-	members, err = getChangeMembers(cc)
+	members, err = rh.checkAndGetChangeMembers(cc)
 	s.NoError(err)
-	s.NotNil(members)
 	s.Len(members, 1)
-	for _, m := range members {
-		s.EqualValues(m.ID, refs.PeerID(123))
-		s.Nil(m.PeerURLs)
-	}
+	s.Equal(refs.PeerID(123), members[0].ID)
+	s.Equal([]string{"http://127.0.0.1:2022"}, members[0].PeerURLs)
 
-	cc.Type = pb.ConfChangeRemoveNode
-	cc.Context = make([]byte, 0)
-	members, err = getChangeMembers(cc)
-	s.NoError(err)
-	s.NotNil(members)
-	s.Len(members, 1)
-	for _, m := range members {
-		s.EqualValues(m.ID, refs.PeerID(123))
-		s.Nil(m.PeerURLs)
+	mockStore.On("GetAllMemberURLs").Return(map[PeerID][]string{
+		PeerID(123): {"http://127.0.0.1:2022"},
+	}, nil).Once()
+	_, err = rh.checkAndGetChangeMembers(cc)
+	s.Error(err)
+
+	// remove
+	mockStore.On("GetAllMemberURLs").Return(map[PeerID][]string{
+		PeerID(123): {"http://127.0.0.1:2022"},
+	}, nil).Twice()
+
+	cc = pb.ConfChange{
+		Type:   pb.ConfChangeRemoveNode,
+		NodeID: uint64(123),
 	}
+	members, err = rh.checkAndGetChangeMembers(cc)
+	s.NoError(err)
+	s.Len(members, 1)
+	s.Equal(refs.PeerID(123), members[0].ID)
+	s.Nil(members[0].PeerURLs)
+
+	cc = pb.ConfChange{
+		Type:   pb.ConfChangeRemoveNode,
+		NodeID: uint64(124),
+	}
+	_, err = rh.checkAndGetChangeMembers(cc)
+	s.Error(err)
 }

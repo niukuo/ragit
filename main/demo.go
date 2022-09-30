@@ -1,21 +1,28 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"path"
 	"strings"
 
+	"github.com/grpc-ecosystem/grpc-gateway/runtime"
 	"github.com/niukuo/ragit/api"
 	"github.com/niukuo/ragit/bdb"
 	"github.com/niukuo/ragit/gitexec"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
+	"github.com/soheilhy/cmux"
+	serverpb "go.etcd.io/etcd/etcdserver/etcdserverpb"
+	"go.etcd.io/etcd/etcdserver/etcdserverpb/gw"
 	etcdraft "go.etcd.io/etcd/raft"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -89,6 +96,8 @@ func main() {
 		log.Fatalln(err)
 	}
 
+	addr := strings.TrimPrefix(peerListenURLs[0], "http://")
+
 	mux := http.NewServeMux()
 	nh := node.Handler()
 	mux.Handle("/raft", nh)
@@ -99,7 +108,43 @@ func main() {
 		api.NewGitHandler("repo.git", storage, node, logging.GetLogger("repo.git"), api.WithLimitSize(*maxFileSize, *maxPackSize))),
 	)
 
-	log.Fatalln(http.ListenAndServe(strings.TrimPrefix(peerListenURLs[0], "http://"), LogHandler(mux)))
+	gwmux := runtime.NewServeMux()
+	opt := []grpc.DialOption{grpc.WithInsecure()}
+	if err := gw.RegisterClusterHandlerFromEndpoint(context.Background(), gwmux, addr, opt); err != nil {
+		log.Fatalln(err)
+	}
+
+	mux.Handle("/v3/cluster/member/", gwmux)
+
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	m := cmux.New(l)
+	grpcL := m.MatchWithWriters(cmux.HTTP2MatchHeaderFieldPrefixSendSettings("content-type", "application/grpc"))
+	httpL := m.Match(cmux.HTTP1Fast())
+
+	grpcServer := grpc.NewServer()
+	serverpb.RegisterClusterServer(grpcServer, node.Service())
+
+	httpServer := http.Server{
+		Handler: LogHandler(mux),
+	}
+
+	go func() {
+		if err := grpcServer.Serve(grpcL); err != nil {
+			log.Fatalf("grpc.Serve err: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := httpServer.Serve(httpL); err != nil {
+			log.Fatalf("http.Serve err: %v", err)
+		}
+	}()
+
+	m.Serve()
 }
 
 func LogHandler(def http.Handler) http.Handler {

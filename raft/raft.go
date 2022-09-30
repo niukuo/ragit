@@ -2,12 +2,10 @@ package raft
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -30,6 +28,9 @@ type msgWithResult struct {
 	handle       refs.ReqHandle
 	doneCb       ReqDoneCallback
 
+	typ pb.EntryType
+	cc  pb.ConfChange
+
 	err      error
 	req      *doingRequest
 	proposed chan<- struct{}
@@ -45,6 +46,7 @@ type Raft interface {
 
 	Propose(ctx context.Context, cmds []*packp.Command, pack []byte, handle refs.ReqHandle) (DoingRequest, error)
 	proposeReadIndex(ctx context.Context, rctx []byte) error
+	proposeConfChange(ctx context.Context, cc pb.ConfChange) error
 
 	getContext(term, index uint64) (*doingRequest, error)
 	applyConfChange(confState pb.ConfChange) (*pb.ConfState, error)
@@ -55,10 +57,9 @@ type Raft interface {
 }
 
 type raftNode struct {
-	confChangeC chan pb.ConfChange // proposed cluster config changes
-	propC       chan *msgWithResult
-	funcC       chan func(node *raft.RawNode)
-	readIndexC  chan []byte
+	propC      chan *msgWithResult
+	funcC      chan func(node *raft.RawNode)
+	readIndexC chan []byte
 
 	softState unsafe.Pointer
 
@@ -66,16 +67,10 @@ type raftNode struct {
 
 	readyHandler ReadyHandler
 
-	newMemberID func(addr []string) refs.PeerID
-
 	Runner
 
 	raftLogger  logging.Logger
 	eventLogger logging.Logger
-}
-
-type ConfChangeParams struct {
-	PeerUrls []string `json:"peerUrls"`
 }
 
 func NewRaft(config Config,
@@ -83,14 +78,11 @@ func NewRaft(config Config,
 	raftLogger := logging.GetLogger("raft")
 	eventLogger := logging.GetLogger("event")
 	rc := &raftNode{
-		confChangeC: make(chan pb.ConfChange),
-		propC:       make(chan *msgWithResult),
-		funcC:       make(chan func(node *raft.RawNode)),
-		readIndexC:  make(chan []byte, 1),
+		propC:      make(chan *msgWithResult),
+		funcC:      make(chan func(node *raft.RawNode)),
+		readIndexC: make(chan []byte, 1),
 
 		requests: NewRequestContextManager(),
-
-		newMemberID: refs.DefaultNewMemberID,
 
 		raftLogger:  raftLogger,
 		eventLogger: eventLogger,
@@ -147,14 +139,6 @@ func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.
 		case <-ticker.C:
 			node.Tick()
 
-		case cc := <-rc.confChangeC:
-			if nextIndex == 0 {
-				break
-			}
-			cc.ID = nextIndex
-			if err := node.ProposeConfChange(cc); err == nil {
-				nextIndex++
-			}
 		case msg := <-rc.propC:
 			msg.err = func() error {
 				if nextIndex == 0 {
@@ -166,8 +150,21 @@ func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.
 						msg.expectedTerm, term)
 				}
 
-				if err := node.Propose(msg.data); err != nil {
-					return err
+				switch msg.typ {
+				case pb.EntryNormal:
+					if err := node.Propose(msg.data); err != nil {
+						return err
+					}
+
+				case pb.EntryConfChange:
+					cc := msg.cc
+					cc.ID = nextIndex
+					if err := node.ProposeConfChange(cc); err != nil {
+						return err
+					}
+
+				default:
+					return fmt.Errorf("unsupported msg type: %s", msg.typ)
 				}
 
 				index := nextIndex
@@ -250,8 +247,6 @@ func (rc *raftNode) serveRaft(stopC <-chan struct{}, node *raft.RawNode, d time.
 
 func (rc *raftNode) InitRouter(mux *http.ServeMux) {
 	mux.HandleFunc("/raft/campaign", rc.campaign)
-	mux.HandleFunc("/raft/members", rc.getMemberStatus)
-	mux.HandleFunc("/raft/members/", rc.confChange)
 }
 
 func (rc *raftNode) withPipeline(ctx context.Context, fn func(node *raft.RawNode) error) error {
@@ -270,87 +265,56 @@ func (rc *raftNode) withPipeline(ctx context.Context, fn func(node *raft.RawNode
 	}
 }
 
-func (rc *raftNode) getMemberStatus(w http.ResponseWriter, r *http.Request) {
-	var memberStatus *MemberStatus
+func (rc *raftNode) proposeConfChange(
+	ctx context.Context,
+	cc pb.ConfChange) error {
 
-	if err := rc.withPipeline(r.Context(), func(node *raft.RawNode) error {
-		var errStatus error
-		memberStatus, errStatus = (Status)(node.Status()).MemberStatus(rc.readyHandler.GetAllMemberURLs)
-		if errStatus != nil {
-			return errStatus
-		}
-		return nil
-	}); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	proposedCh := make(chan struct{})
+
+	msg := msgWithResult{
+		typ: pb.EntryConfChange,
+		cc:  cc,
+
+		proposed: proposedCh,
 	}
 
-	encoder := json.NewEncoder(w)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	encoder.Encode(memberStatus)
-}
-
-func (rc *raftNode) confChange(w http.ResponseWriter, r *http.Request) {
-	var opType pb.ConfChangeType
-	var memberID refs.PeerID
-	var peerUrls []string
-
-	switch r.Method {
-	case http.MethodPost:
-		opType = pb.ConfChangeAddNode
-		if r.URL.Query().Get("mode") == "learner" {
-			opType = pb.ConfChangeAddLearnerNode
-		}
-
-		var ccParams ConfChangeParams
-		dec := json.NewDecoder(r.Body)
-		dec.DisallowUnknownFields()
-		err := dec.Decode(&ccParams)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if len(ccParams.PeerUrls) == 0 {
-			http.Error(w, "peer urls is empty", http.StatusBadRequest)
-			return
-		}
-		memberID = rc.newMemberID(ccParams.PeerUrls)
-		peerUrls = ccParams.PeerUrls
-	case http.MethodDelete:
-		opType = pb.ConfChangeRemoveNode
-		id := strings.TrimPrefix(r.URL.Path, "/raft/members/")
-		val, err := strconv.ParseUint(id, 16, 64)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		memberID = refs.PeerID(val)
-	default:
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return
+	if v := ctx.Value(CtxExpectedTermKey); v != nil {
+		msg.expectedTerm = v.(uint64)
 	}
 
-	cc := pb.ConfChange{
-		Type:   opType,
-		NodeID: uint64(memberID),
+	select {
+	case rc.propC <- &msg:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-rc.Runner.Done():
+		return ErrStopped
 	}
 
-	if opType != pb.ConfChangeRemoveNode {
-		member := refs.NewMember(memberID, peerUrls)
-		mb, err := json.Marshal(member)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+	<-proposedCh
+
+	if err := msg.err; err != nil {
+		return err
+	}
+
+	req := msg.req
+
+	rc.eventLogger.Info("proposed conf change",
+		", index: ", req.index,
+		", term: ", req.term,
+		", expectedTerm: ", msg.expectedTerm,
+		", confChange: ", cc.String(),
+	)
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-req.Done():
+		if err := req.Err(); err != nil {
+			return err
 		}
-		cc.Context = mb
 	}
 
-	rc.confChangeC <- cc
-
-	rc.eventLogger.Infof("confChange, op %s, node %s, addrs %+v", opType.String(), memberID, peerUrls)
-	// As above, optimistic that raft will apply the conf change
-	w.WriteHeader(http.StatusNoContent)
+	return nil
 }
 
 func (rc *raftNode) Propose(ctx context.Context, cmds []*packp.Command, pack []byte, handle refs.ReqHandle) (DoingRequest, error) {
@@ -400,6 +364,8 @@ func (rc *raftNode) Propose(ctx context.Context, cmds []*packp.Command, pack []b
 	msg := msgWithResult{
 		data:   content,
 		handle: handle,
+
+		typ: pb.EntryNormal,
 
 		proposed: proposedCh,
 	}

@@ -22,7 +22,7 @@ func (o readyOptions) applyReadyHandler(r *readyHandler) {
 }
 
 func WithNewMemberID(fn func(peerURLs []string) refs.PeerID) NodeOptions {
-	return raftOptions(func(r *raftNode) {
+	return readyOptions(func(r *readyHandler) {
 		r.newMemberID = fn
 	})
 }
