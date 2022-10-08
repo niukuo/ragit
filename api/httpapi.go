@@ -17,26 +17,20 @@ package api
 import (
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/niukuo/ragit/raft"
-	"github.com/niukuo/ragit/refs"
-	"go.etcd.io/etcd/raft/raftpb"
 )
 
 // Handler for a http based key-value store backed by raft
 type httpKVAPI struct {
-	storage     Storage
-	node        raft.Node
-	confChangeC chan<- raftpb.ConfChange
+	storage Storage
+	node    raft.Node
 }
 
 func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -116,65 +110,9 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		io.WriteString(w, string(snap.Data))
 
-	case http.MethodPost:
-		ccVal, err := ioutil.ReadAll(r.Body)
-		if err != nil {
-			log.Printf("Failed to read on POST (%v)\n", err)
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		var ccParams raft.ConfChangeParams
-		err = json.Unmarshal(ccVal, &ccParams)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		now := time.Now()
-		memberID := refs.NewMemberID(ccParams.PeerUrls, &now)
-
-		var typ raftpb.ConfChangeType
-		switch action := r.URL.Query().Get("action"); action {
-		case "add":
-			typ = raftpb.ConfChangeAddNode
-		case "add_learner":
-			typ = raftpb.ConfChangeAddLearnerNode
-		case "remove":
-			typ = raftpb.ConfChangeRemoveNode
-			id := strings.TrimPrefix(r.URL.Path, "/raft/members/")
-			val, err := strconv.ParseUint(id, 16, 64)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			memberID = refs.PeerID(val)
-		default:
-			http.Error(w, "invalid action: "+action, http.StatusBadRequest)
-			return
-		}
-
-		cc := raftpb.ConfChange{
-			Type:   typ,
-			NodeID: uint64(memberID),
-		}
-
-		if typ != raftpb.ConfChangeRemoveNode {
-			member := refs.NewMember(memberID, ccParams.PeerUrls)
-			mb, err := json.Marshal(member)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			cc.Context = mb
-		}
-
-		h.confChangeC <- cc
-
-		// As above, optimistic that raft will apply the conf change
-		w.WriteHeader(http.StatusNoContent)
 	default:
 		w.Header().Set("Allow", http.MethodPut)
 		w.Header().Add("Allow", http.MethodGet)
-		w.Header().Add("Allow", http.MethodPost)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
