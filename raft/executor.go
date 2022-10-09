@@ -138,14 +138,14 @@ func (e *executor) applyEntry(entry *pb.Entry) (err error) {
 
 	if req != nil {
 		handle = req.handle
-		defer req.fire(err)
+		defer func() { req.fire(err) }()
 	}
 
 	var oplog refs.Oplog
-	if err := proto.Unmarshal(entry.Data, &oplog); err != nil {
+	if err = proto.Unmarshal(entry.Data, &oplog); err != nil {
 		return err
 	}
-	if err := e.sm.OnApply(entry.Term, entry.Index, oplog, handle); err != nil {
+	if err = e.sm.OnApply(entry.Term, entry.Index, oplog, handle); err != nil {
 		return err
 	}
 
