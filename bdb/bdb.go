@@ -76,11 +76,12 @@ func Open(path string,
 
 	walOpts := opts.WALOptions
 	if walOpts.Logger == nil {
-		walOpts = &*opts.WALOptions
-		walOpts.Logger = opts.Logger
+		dupOpts := *opts.WALOptions
+		dupOpts.Logger = opts.Logger
+		walOpts = &dupOpts
 	}
 
-	wal, err := OpenWAL(path+"/wal", opts.WALOptions)
+	wal, err := OpenWAL(path+"/wal", walOpts)
 	if err != nil {
 		return nil, err
 	}
