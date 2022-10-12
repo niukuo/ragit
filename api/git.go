@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/format/packfile"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
@@ -35,11 +36,28 @@ const (
 	Service_ReceivePack
 )
 
+type Options func(h *httpGitAPI)
+
+func WithLimitSize(maxFileSize, maxPackSize int64) Options {
+	return Options(func(h *httpGitAPI) {
+		h.maxFileSize = maxFileSize
+		h.maxPackSize = maxPackSize
+	})
+}
+
+const (
+	DefaultMaxFileSize = 1 * 1024 * 1024
+	DefaultMaxPackSize = 10 * 1024 * 1024
+)
+
 type httpGitAPI struct {
 	path string
 	rdb  Storage
 	node raft.Node
 	*http.ServeMux
+
+	maxFileSize int64
+	maxPackSize int64
 
 	logger logging.Logger
 }
@@ -49,11 +67,15 @@ func NewGitHandler(
 	rdb Storage,
 	node raft.Node,
 	logger logging.Logger,
+	opts ...Options,
 ) *httpGitAPI {
 	h := &httpGitAPI{
-		path:   path,
-		rdb:    rdb,
-		node:   node,
+		path:        path,
+		rdb:         rdb,
+		node:        node,
+		maxFileSize: DefaultMaxFileSize,
+		maxPackSize: DefaultMaxPackSize,
+
 		logger: logger,
 	}
 
@@ -63,6 +85,10 @@ func NewGitHandler(
 	mux.HandleFunc("/git-upload-pack", h.UploadPack)
 
 	h.ServeMux = mux
+
+	for _, opt := range opts {
+		opt(h)
+	}
 
 	return h
 }
@@ -229,6 +255,12 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := h.checkLimitSize(content); err != nil {
+		h.logger.Errorf("check size failed, err: %v", err)
+		refs.ReportReceivePackError(w, err.Error())
+		return
+	}
+
 	writerCh := make(chan io.Writer)
 	defer close(writerCh)
 	rreq, err := tx.Commit(r.Context(), content, gitexec.WriterCh(writerCh))
@@ -332,4 +364,31 @@ func (h *httpGitAPI) getMemberStatus(ctx context.Context) (*raft.MemberStatus, e
 	}
 
 	return memberStatus, nil
+}
+
+func (h *httpGitAPI) checkLimitSize(content []byte) error {
+	packSize := len(content)
+	if int64(packSize) > h.maxPackSize {
+		return fmt.Errorf("pack file size: %d is larger than maxPackSize: %d", packSize, h.maxPackSize)
+	}
+
+	r := bytes.NewReader(content)
+	scanner := packfile.NewScanner(r)
+	_, objectNum, err := scanner.Header()
+	if err != nil {
+		return err
+	}
+
+	for i := uint32(0); i < objectNum; i++ {
+		objectHeader, err := scanner.NextObjectHeader()
+		if err != nil {
+			return err
+		}
+
+		if objectHeader.Length > h.maxFileSize {
+			return fmt.Errorf("object size: %d larger than %d", objectHeader.Length, h.maxFileSize)
+		}
+	}
+
+	return nil
 }

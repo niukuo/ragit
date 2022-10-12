@@ -22,6 +22,8 @@ func main() {
 
 	cluster := flag.String("cluster", "http://127.0.0.1:9021", "comma separated peer urls, joined different node by semicolon")
 	peer := flag.String("peer_listen_urls", "http://127.0.0.1:9021", "list of comma separated URLs to listen on for peer traffic")
+	maxFileSize := flag.Int64("max_file_size", 1*1024*1024, "limit file size")
+	maxPackSize := flag.Int64("max_pack_size", 10*1024*1024, "limit write file total size")
 
 	flag.Parse()
 
@@ -94,7 +96,7 @@ func main() {
 	mux.Handle("/debug/", http.DefaultServeMux)
 	mux.Handle("/refs/", api.NewHandler(storage, node))
 	mux.Handle("/repo.git/", http.StripPrefix("/repo.git",
-		api.NewGitHandler("repo.git", storage, node, logging.GetLogger("repo.git"))),
+		api.NewGitHandler("repo.git", storage, node, logging.GetLogger("repo.git"), api.WithLimitSize(*maxFileSize, *maxPackSize))),
 	)
 
 	log.Fatalln(http.ListenAndServe(strings.TrimPrefix(peerListenURLs[0], "http://"), LogHandler(mux)))
