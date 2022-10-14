@@ -252,7 +252,7 @@ func (l *listener) exec(name string, args ...string) error {
 	return nil
 }
 
-func (l *listener) FetchObjects(refsMap map[string]refs.Hash, addrs []string) error {
+func (l *listener) FetchObjects(refsMap map[string]refs.Hash, addrs []string) (err error) {
 	var endpoint *transport.Endpoint
 	for _, addr := range addrs {
 		epoint, err := transport.NewEndpoint(addr + "/" + path.Base(l.dir))
@@ -271,7 +271,7 @@ func (l *listener) FetchObjects(refsMap map[string]refs.Hash, addrs []string) er
 	if err != nil {
 		return err
 	}
-	defer ioutil.CheckClose(s, nil)
+	defer ioutil.CheckClose(s, &err)
 
 	wants := make(map[plumbing.Hash]bool)
 	haves := make(map[plumbing.Hash]bool)
@@ -341,7 +341,7 @@ func (l *listener) FetchObjects(refsMap map[string]refs.Hash, addrs []string) er
 func (l *listener) fetchObjects(ctx context.Context,
 	s transport.UploadPackSession,
 	req *packp.UploadPackRequest,
-) error {
+) (err error) {
 	plumbing.HashesSort(req.Wants)
 	plumbing.HashesSort(req.Haves)
 
@@ -352,7 +352,7 @@ func (l *listener) fetchObjects(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	defer ioutil.CheckClose(reader, nil)
+	defer ioutil.CheckClose(reader, &err)
 
 	sr := buildSidebandIfSupported(req.Capabilities, reader, nil)
 
