@@ -681,8 +681,6 @@ func (s *storage) GetConfState() (*pb.ConfState, error) {
 func (s *storage) OnApply(term, index uint64, oplog refs.Oplog, handle refs.ReqHandle) error {
 	start := time.Now()
 
-	var errSkip = errors.New("check failed, skip")
-
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
 		metab := tx.Bucket(BucketMeta)
 		if err := putUint64(metab, map[string]uint64{
@@ -737,7 +735,7 @@ func (s *storage) OnApply(term, index uint64, oplog refs.Oplog, handle refs.ReqH
 		}
 
 		return nil
-	}); err != nil && err != errSkip {
+	}); err != nil {
 		return err
 	}
 
