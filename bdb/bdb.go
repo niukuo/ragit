@@ -413,7 +413,7 @@ func (s *storage) GetAllMemberURLs() (map[refs.PeerID][]string, error) {
 
 func onMemberChange(membersb *bbolt.Bucket, members []refs.Member, confType pb.ConfChangeType) error {
 	switch confType {
-	case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
+	case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode, pb.ConfChangeUpdateNode:
 		for _, m := range members {
 			var key [8]byte
 			binary.BigEndian.PutUint64(key[:], uint64(m.ID))

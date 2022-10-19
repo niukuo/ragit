@@ -562,6 +562,12 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 					rc.raftLogger.Infof("transport.AddPeer of id %s, peer_urls: %v",
 						types.ID(cc.NodeID), members[0].PeerURLs)
 				}
+			case pb.ConfChangeUpdateNode:
+				if cc.NodeID != uint64(rc.id) && len(members) == 1 {
+					rc.transport.UpdatePeer(types.ID(cc.NodeID), members[0].PeerURLs)
+					rc.raftLogger.Infof("transport.UpdatePeer of id %s, peer_urls: %v",
+						types.ID(cc.NodeID), members[0].PeerURLs)
+				}
 			case pb.ConfChangeRemoveNode:
 				if cc.NodeID == uint64(rc.id) {
 					rc.mayTransferLeader()
@@ -657,6 +663,22 @@ func (rc *readyHandler) checkAndGetChangeMembers(cc pb.ConfChange) ([]refs.Membe
 
 			members = append(members, confChangeContext.Member)
 		}
+
+	case pb.ConfChangeUpdateNode:
+		if len(cc.Context) == 0 {
+			return nil, errors.New("ConfChangeUpdateNode Context cannot be empty")
+		}
+
+		var confChangeContext ConfChangeContext
+		if err := json.Unmarshal(cc.Context, &confChangeContext); err != nil {
+			return nil, err
+		}
+
+		if _, ok := memberURLs[id]; !ok {
+			return nil, fmt.Errorf("member id: %s not found", id)
+		}
+
+		members = append(members, refs.NewMember(id, confChangeContext.PeerURLs))
 
 	case pb.ConfChangeRemoveNode:
 		if len(cc.Context) != 0 {

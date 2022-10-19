@@ -144,7 +144,36 @@ func (cs *clusterServer) MemberUpdate(
 	request *serverpb.MemberUpdateRequest,
 ) (*serverpb.MemberUpdateResponse, error) {
 
-	return nil, errors.New("method MemberUpdate not implemented")
+	if _, err := types.NewURLs(request.PeerURLs); err != nil {
+		return nil, err
+	}
+
+	id := PeerID(request.ID)
+
+	confChangeContext := ConfChangeContext{
+		Member:    refs.NewMember(id, request.PeerURLs),
+		IsPromote: false,
+	}
+
+	data, err := json.Marshal(confChangeContext)
+	if err != nil {
+		return nil, err
+	}
+
+	cc := pb.ConfChange{
+		Type:    pb.ConfChangeUpdateNode,
+		NodeID:  uint64(id),
+		Context: data,
+	}
+
+	if err := cs.proposeConfChange(ctx, cc); err != nil {
+		return nil, err
+	}
+
+	return &serverpb.MemberUpdateResponse{
+		Header: cs.header(ctx),
+	}, nil
+
 }
 
 func (cs *clusterServer) MemberList(

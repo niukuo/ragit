@@ -99,6 +99,25 @@ func TestCheckAndGetChangeMembers(t *testing.T) {
 	_, err = rh.checkAndGetChangeMembers(cc)
 	s.Error(err)
 
+	// update
+	mockStore.On("GetAllMemberURLs").Return(map[PeerID][]string{}, nil).Once()
+	cc = pb.ConfChange{
+		Type:    pb.ConfChangeUpdateNode,
+		NodeID:  uint64(123),
+		Context: ctxb,
+	}
+
+	_, err = rh.checkAndGetChangeMembers(cc)
+	s.Error(err)
+
+	mockStore.On("GetAllMemberURLs").Return(map[PeerID][]string{
+		PeerID(123): {"http://127.0.0.1:2021"},
+	}, nil).Once()
+	members, err = rh.checkAndGetChangeMembers(cc)
+	s.NoError(err)
+	s.Len(members, 1)
+	s.Equal([]string{"http://127.0.0.1:2022"}, members[0].PeerURLs)
+
 	// remove
 	mockStore.On("GetAllMemberURLs").Return(map[PeerID][]string{
 		PeerID(123): {"http://127.0.0.1:2022"},
