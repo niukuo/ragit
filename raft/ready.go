@@ -541,6 +541,10 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 				return nil
 			}
 
+			if len(members) > 1 {
+				return fmt.Errorf("got more than 1 members: %v", members)
+			}
+
 			confState, err := rc.raft.applyConfChange(cc)
 			if err != nil {
 				return err
@@ -553,12 +557,10 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 
 			switch typ := cc.Type; typ {
 			case pb.ConfChangeAddNode, pb.ConfChangeAddLearnerNode:
-				if cc.NodeID != uint64(rc.id) {
-					for _, m := range members {
-						rc.transport.AddPeer(types.ID(cc.NodeID), m.PeerURLs)
-						rc.raftLogger.Infof("transport.AddPeer of id %s, peer_urls: %v",
-							types.ID(cc.NodeID), m.PeerURLs)
-					}
+				if cc.NodeID != uint64(rc.id) && len(members) == 1 {
+					rc.transport.AddPeer(types.ID(cc.NodeID), members[0].PeerURLs)
+					rc.raftLogger.Infof("transport.AddPeer of id %s, peer_urls: %v",
+						types.ID(cc.NodeID), members[0].PeerURLs)
 				}
 			case pb.ConfChangeRemoveNode:
 				if cc.NodeID == uint64(rc.id) {
