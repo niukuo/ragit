@@ -7,6 +7,7 @@ import (
 
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
+	pb "go.etcd.io/etcd/raft/raftpb"
 )
 
 type DoingRequest interface {
@@ -36,6 +37,8 @@ func (r *requestContextManager) Append(term, index uint64, msg *msgWithResult) e
 		term:   term,
 		doneCb: msg.doneCb,
 		handle: msg.handle,
+
+		typ: msg.typ,
 
 		done: make(chan struct{}),
 	}
@@ -128,6 +131,8 @@ type doingRequest struct {
 	term   uint64
 	doneCb ReqDoneCallback
 	handle refs.ReqHandle
+
+	typ pb.EntryType
 
 	err  error
 	done chan struct{}

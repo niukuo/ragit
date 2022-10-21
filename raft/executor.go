@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"errors"
 	"sync/atomic"
 
 	"github.com/golang/protobuf/proto"
@@ -116,6 +117,8 @@ func (e *executor) Run(stopC <-chan struct{}) error {
 		case <-stopC:
 			return nil
 		case entry := <-e.entryCh:
+			// A new raft leader first tries to commit a no-op log entry
+			// to implicit commit previous-term logs and figure out current commitIndex.
 			if atomic.CompareAndSwapUint64(&e.leaderTerm, entry.Term, 0) {
 				e.sm.OnLeaderStart(entry.Term)
 			}
@@ -138,7 +141,20 @@ func (e *executor) applyEntry(entry *pb.Entry) (err error) {
 
 	if req != nil {
 		handle = req.handle
-		defer func() { req.fire(err) }()
+		defer func() {
+			if err != nil {
+				req.fire(err)
+			} else {
+				var respErr error
+				// NOTE: pb.EntryConfChange can be dropped to no-op pb.EntryNormal in etcd/raft
+				// if there is prior unapplied configuration change in its log.
+				if len(entry.Data) == 0 && req.typ == pb.EntryConfChange {
+					respErr = errors.New("dropped conf change")
+				}
+
+				req.fire(respErr)
+			}
+		}()
 	}
 
 	var oplog refs.Oplog
