@@ -68,6 +68,7 @@ type readyHandler struct {
 	confIndex uint64
 
 	ClusterServer
+	MaintenanceServer
 
 	Runner
 
@@ -128,7 +129,7 @@ func RunNode(c Config,
 		return nil, err
 	}
 
-	clusterServer := NewClusterServer(ServerConfig{
+	serverConfig := ServerConfig{
 		clusterId: c.ClusterID,
 		id:        id,
 
@@ -136,7 +137,7 @@ func RunNode(c Config,
 		raft:    r,
 
 		newMemberID: refs.DefaultNewMemberID,
-	})
+	}
 
 	rc := &readyHandler{
 		id: id,
@@ -161,7 +162,8 @@ func RunNode(c Config,
 		executor:  executor,
 		confIndex: state.ConfIndex,
 
-		ClusterServer: clusterServer,
+		ClusterServer:     NewClusterServer(serverConfig),
+		MaintenanceServer: NewMaintenanceServer(serverConfig),
 
 		raftLogger:  logging.GetLogger("ready"),
 		eventLogger: logging.GetLogger("event.ready"),
@@ -763,8 +765,12 @@ func (rc *readyHandler) InitRouter(mux *http.ServeMux) {
 	rc.raft.InitRouter(mux)
 }
 
-func (rc *readyHandler) Service() ClusterServer {
+func (rc *readyHandler) ClusterService() ClusterServer {
 	return rc.ClusterServer
+}
+
+func (rc *readyHandler) MaintenanceService() MaintenanceServer {
+	return rc.MaintenanceServer
 }
 
 func (rc *readyHandler) getSnapshot(w http.ResponseWriter, r *http.Request) {

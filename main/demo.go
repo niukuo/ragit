@@ -113,8 +113,12 @@ func main() {
 	if err := gw.RegisterClusterHandlerFromEndpoint(context.Background(), gwmux, addr, opt); err != nil {
 		log.Fatalln(err)
 	}
+	if err := gw.RegisterMaintenanceHandlerFromEndpoint(context.Background(), gwmux, addr, opt); err != nil {
+		log.Fatal(err)
+	}
 
 	mux.Handle("/v3/cluster/member/", gwmux)
+	mux.Handle("/v3/maintenance/", gwmux)
 
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -126,7 +130,8 @@ func main() {
 	httpL := m.Match(cmux.HTTP1Fast())
 
 	grpcServer := grpc.NewServer()
-	serverpb.RegisterClusterServer(grpcServer, node.Service())
+	serverpb.RegisterClusterServer(grpcServer, node.ClusterService())
+	serverpb.RegisterMaintenanceServer(grpcServer, node.MaintenanceService())
 
 	httpServer := http.Server{
 		Handler: LogHandler(mux),
