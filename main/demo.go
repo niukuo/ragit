@@ -49,8 +49,8 @@ func main() {
 	opts := bdb.NewOptions()
 	opts.Listener = listener
 	opts.Logger = logging.GetLogger("bdb")
-	opts.NewLocalID = func() refs.PeerID {
-		return refs.NewMemberID(peerListenURLs, nil)
+	opts.NewLocalID = func() (refs.PeerID, error) {
+		return refs.NewMemberID(peerListenURLs, nil), nil
 	}
 
 	storage, err := bdb.Open(dir, opts)

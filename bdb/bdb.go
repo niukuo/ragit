@@ -56,7 +56,7 @@ type Options struct {
 
 	*WALOptions
 
-	NewLocalID func() refs.PeerID
+	NewLocalID func() (refs.PeerID, error)
 }
 
 func NewOptions() *Options {
@@ -112,7 +112,7 @@ func Open(path string,
 	return s, nil
 }
 
-func (s *storage) initBuckets(newLocalID func() refs.PeerID) error {
+func (s *storage) initBuckets(newLocalID func() (refs.PeerID, error)) error {
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
 		metab, err := tx.CreateBucket(BucketMeta)
 		if err != nil {
@@ -136,7 +136,10 @@ func (s *storage) initBuckets(newLocalID func() refs.PeerID) error {
 				return nil
 			}
 
-			localID := newLocalID()
+			localID, err := newLocalID()
+			if err != nil {
+				return err
+			}
 			if localID == refs.PeerID(0) {
 				return ErrLocalIDIsZero
 			}
@@ -169,7 +172,10 @@ func (s *storage) initBuckets(newLocalID func() refs.PeerID) error {
 			return err
 		}
 
-		localID := newLocalID()
+		localID, err := newLocalID()
+		if err != nil {
+			return err
+		}
 		if localID == refs.PeerID(0) {
 			return ErrLocalIDIsZero
 		}

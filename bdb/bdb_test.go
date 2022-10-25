@@ -21,7 +21,7 @@ import (
 type bdbSuite struct {
 	suite.Suite
 	dir        string
-	newLocalID func() refs.PeerID
+	newLocalID func() (refs.PeerID, error)
 }
 
 func TestBDB(t *testing.T) {
@@ -33,8 +33,8 @@ func (s *bdbSuite) SetupTest() {
 	s.NoError(err)
 
 	s.dir = dir
-	s.newLocalID = func() refs.PeerID {
-		return refs.PeerID(222)
+	s.newLocalID = func() (refs.PeerID, error) {
+		return refs.PeerID(222), nil
 	}
 }
 
@@ -131,8 +131,8 @@ func (s *bdbSuite) TestInitBuckets() {
 
 	opts := bdb.NewOptions()
 	opts.Logger = logging.GetLogger("")
-	opts.NewLocalID = func() refs.PeerID {
-		return refs.PeerID(123456)
+	opts.NewLocalID = func() (refs.PeerID, error) {
+		return refs.PeerID(123456), nil
 	}
 
 	// db no data

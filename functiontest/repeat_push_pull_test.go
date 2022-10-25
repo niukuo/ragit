@@ -52,8 +52,8 @@ func (s *GitServer) Start() error {
 	opts := bdb.NewOptions()
 	opts.Listener = listener
 	opts.Logger = logging.GetLogger("")
-	opts.NewLocalID = func() refs.PeerID {
-		return refs.NewMemberID(s.peerURLs, nil)
+	opts.NewLocalID = func() (refs.PeerID, error) {
+		return refs.NewMemberID(s.peerURLs, nil), nil
 	}
 
 	s.storage, err = bdb.Open(s.dir, opts)
