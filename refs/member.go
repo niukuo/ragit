@@ -16,9 +16,10 @@ type member struct {
 }
 
 func NewMember(id PeerID, peerURLs []string) Member {
+
 	return &member{
 		ID:       id,
-		PeerURLs: peerURLs,
+		PeerURLs: sortPeerURLs(peerURLs),
 	}
 }
 
@@ -28,9 +29,7 @@ func (m *member) String() string {
 
 func NewMemberID(peerURLs []string, now *time.Time) PeerID {
 
-	sort.Strings(peerURLs)
-
-	str := strings.Join(peerURLs, "")
+	str := strings.Join(sortPeerURLs(peerURLs), "")
 	b := []byte(str)
 	if now != nil {
 		b = append(b, []byte(fmt.Sprintf("%d", now.Unix()))...)
@@ -43,4 +42,16 @@ func NewMemberID(peerURLs []string, now *time.Time) PeerID {
 func DefaultNewMemberID(peerURLs []string) PeerID {
 	now := time.Now()
 	return NewMemberID(peerURLs, &now)
+}
+
+func sortPeerURLs(peerURLs []string) []string {
+	if len(peerURLs) == 0 {
+		return peerURLs
+	}
+
+	us := make([]string, len(peerURLs))
+	copy(us, peerURLs)
+	sort.Strings(us)
+
+	return us
 }
