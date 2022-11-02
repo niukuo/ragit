@@ -40,8 +40,9 @@ func main() {
 	myid := refs.NewMemberID(peerListenURLs, nil)
 
 	dir := strings.Replace(myid.String(), ":", "_", -1)
+	gitPath := path.Join(dir, "repo.git")
 
-	listener, err := gitexec.NewListener(path.Join(dir, "repo.git"), logging.GetLogger("gitexec"))
+	listener, err := gitexec.NewListener(gitPath, logging.GetLogger("gitexec"))
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -105,7 +106,8 @@ func main() {
 	mux.Handle("/debug/", http.DefaultServeMux)
 	mux.Handle("/refs/", api.NewHandler(storage, node))
 	mux.Handle("/repo.git/", http.StripPrefix("/repo.git",
-		api.NewGitHandler("repo.git", storage, node, logging.GetLogger("repo.git"), api.WithLimitSize(*maxFileSize, *maxPackSize))),
+		api.NewGitHandler(gitPath, storage, node,
+			logging.GetLogger("repo.git"), api.WithLimitSize(*maxFileSize, *maxPackSize))),
 	)
 
 	gwmux := runtime.NewServeMux()
