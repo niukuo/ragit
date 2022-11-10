@@ -120,15 +120,6 @@ func RunNode(c Config,
 		ErrorC:      make(chan error, 1),
 	}
 
-	if err := transport.Start(); err != nil {
-		return nil, err
-	}
-
-	executor, err := StartExecutor(r, sm)
-	if err != nil {
-		return nil, err
-	}
-
 	serverConfig := ServerConfig{
 		clusterId: c.ClusterID,
 		id:        id,
@@ -159,7 +150,6 @@ func RunNode(c Config,
 
 		txnLocker: NewMapLocker(),
 
-		executor:  executor,
 		confIndex: state.ConfIndex,
 
 		ClusterServer:     NewClusterServer(serverConfig),
@@ -172,6 +162,16 @@ func RunNode(c Config,
 	for _, opt := range opts {
 		opt.applyReadyHandler(rc)
 	}
+
+	if err := transport.Start(); err != nil {
+		return nil, err
+	}
+
+	executor, err := StartExecutor(r, sm)
+	if err != nil {
+		return nil, err
+	}
+	rc.executor = executor
 
 	rc.raftLogger.Info("starting raft instance, applied_index: ", state.AppliedIndex,
 		", conf_index: ", state.ConfIndex,

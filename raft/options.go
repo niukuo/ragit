@@ -1,6 +1,9 @@
 package raft
 
-import "github.com/niukuo/ragit/refs"
+import (
+	"github.com/niukuo/ragit/refs"
+	"go.etcd.io/etcd/pkg/transport"
+)
 
 type NodeOptions interface {
 	applyRaft(r *raftNode)
@@ -30,5 +33,11 @@ func WithNewMemberID(fn func(peerURLs []string) refs.PeerID) NodeOptions {
 func WithTxnLocker(txnLocker MapLocker) NodeOptions {
 	return readyOptions(func(r *readyHandler) {
 		r.txnLocker = txnLocker
+	})
+}
+
+func WithTLSInfo(tlsInfo transport.TLSInfo) NodeOptions {
+	return readyOptions(func(r *readyHandler) {
+		r.transport.TLSInfo = tlsInfo
 	})
 }
