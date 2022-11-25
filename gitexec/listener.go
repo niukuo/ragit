@@ -22,7 +22,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/sideband"
 	"github.com/go-git/go-git/v5/plumbing/storer"
 	"github.com/go-git/go-git/v5/plumbing/transport"
-	"github.com/go-git/go-git/v5/plumbing/transport/http"
+	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/go-git/go-git/v5/utils/ioutil"
 	"github.com/juju/errors"
@@ -33,20 +33,34 @@ import (
 // Listener executes git command during apply
 type Listener = *listener
 type listener struct {
-	dir    string
-	store  storer.Storer
-	logger logging.Logger
+	dir       string
+	store     storer.Storer
+	gitClient transport.Transport
+	logger    logging.Logger
+}
+
+type Options func(l *listener)
+
+func WithGitClient(gitClient transport.Transport) Options {
+	return Options(func(l *listener) {
+		l.gitClient = gitClient
+	})
 }
 
 // NewListener return a listener for the repo
-func NewListener(dir string, logger logging.Logger) (Listener, error) {
+func NewListener(dir string, logger logging.Logger, opts ...Options) (Listener, error) {
 
 	l := &listener{
-		dir:    dir,
-		logger: logger,
+		dir:       dir,
+		gitClient: githttp.DefaultClient,
+		logger:    logger,
 	}
 	l.store = filesystem.NewStorageWithOptions(osfs.New(dir),
 		cache.NewObjectLRUDefault(), filesystem.Options{})
+
+	for _, opt := range opts {
+		opt(l)
+	}
 
 	return l, nil
 }
@@ -266,8 +280,7 @@ func (l *listener) FetchObjects(refsMap map[string]refs.Hash, addrs []string) (e
 		return fmt.Errorf("[listener.FetchObjects] transport NewEndpoint failed, addrs: %v", addrs)
 	}
 
-	gitClient := http.DefaultClient
-	s, err := gitClient.NewUploadPackSession(endpoint, nil)
+	s, err := l.gitClient.NewUploadPackSession(endpoint, nil)
 	if err != nil {
 		return err
 	}
