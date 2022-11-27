@@ -17,8 +17,8 @@ import (
 	ragit "github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/bbolt"
-	"go.etcd.io/etcd/raft"
-	pb "go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/v3"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 var (

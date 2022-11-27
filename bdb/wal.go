@@ -3,7 +3,7 @@ package bdb
 import (
 	"io"
 
-	pb "go.etcd.io/etcd/raft/raftpb"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 type WALStorage interface {

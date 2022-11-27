@@ -20,7 +20,7 @@ import (
 	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
 	"github.com/stretchr/testify/suite"
-	etcdraft "go.etcd.io/etcd/raft"
+	etcdraft "go.etcd.io/etcd/raft/v3"
 )
 
 type GitServer struct {

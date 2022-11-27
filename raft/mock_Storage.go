@@ -6,7 +6,7 @@ import (
 	io "io"
 
 	mock "github.com/stretchr/testify/mock"
-	raftpb "go.etcd.io/etcd/raft/raftpb"
+	raftpb "go.etcd.io/etcd/raft/v3/raftpb"
 
 	refs "github.com/niukuo/ragit/refs"
 )

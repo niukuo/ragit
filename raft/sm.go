@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/niukuo/ragit/refs"
-	pb "go.etcd.io/etcd/raft/raftpb"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 type StateMachine interface {

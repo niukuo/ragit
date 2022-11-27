@@ -7,9 +7,9 @@ import (
 
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
-	serverpb "go.etcd.io/etcd/etcdserver/etcdserverpb"
-	"go.etcd.io/etcd/pkg/types"
-	pb "go.etcd.io/etcd/raft/raftpb"
+	serverpb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 var _ serverpb.ClusterServer = (*clusterServer)(nil)

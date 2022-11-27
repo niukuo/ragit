@@ -17,12 +17,12 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
-	"go.etcd.io/etcd/etcdserver/api/rafthttp"
-	stats "go.etcd.io/etcd/etcdserver/api/v2stats"
-	"go.etcd.io/etcd/pkg/idutil"
-	"go.etcd.io/etcd/pkg/types"
-	"go.etcd.io/etcd/raft"
-	pb "go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	"go.etcd.io/etcd/pkg/v3/idutil"
+	"go.etcd.io/etcd/raft/v3"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
+	stats "go.etcd.io/etcd/server/v3/etcdserver/api/v2stats"
 	"go.uber.org/zap"
 )
 
@@ -116,7 +116,7 @@ func RunNode(c Config,
 		ClusterID:   c.ClusterID,
 		Raft:        r,
 		ServerStats: stats.NewServerStats(id.String(), id.String()),
-		LeaderStats: stats.NewLeaderStats(id.String()),
+		LeaderStats: stats.NewLeaderStats(nil, id.String()),
 		ErrorC:      make(chan error, 1),
 	}
 

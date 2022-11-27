@@ -15,7 +15,7 @@ import (
 	"github.com/niukuo/ragit/refs"
 	"github.com/stretchr/testify/suite"
 	"go.etcd.io/bbolt"
-	pb "go.etcd.io/etcd/raft/raftpb"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 type bdbSuite struct {

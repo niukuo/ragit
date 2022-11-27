@@ -2,7 +2,7 @@ package raft
 
 import (
 	"github.com/niukuo/ragit/refs"
-	"go.etcd.io/etcd/pkg/transport"
+	"go.etcd.io/etcd/client/pkg/v3/transport"
 )
 
 type NodeOptions interface {

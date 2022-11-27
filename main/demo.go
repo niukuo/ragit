@@ -19,9 +19,9 @@ import (
 	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
 	"github.com/soheilhy/cmux"
-	serverpb "go.etcd.io/etcd/etcdserver/etcdserverpb"
-	"go.etcd.io/etcd/etcdserver/etcdserverpb/gw"
-	etcdraft "go.etcd.io/etcd/raft"
+	serverpb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/etcdserverpb/gw"
+	etcdraft "go.etcd.io/etcd/raft/v3"
 	"google.golang.org/grpc"
 )
 

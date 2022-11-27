@@ -9,8 +9,8 @@ import (
 	ragit "github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
 	"github.com/stretchr/testify/suite"
-	"go.etcd.io/etcd/raft"
-	pb "go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/v3"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 type Storage interface {

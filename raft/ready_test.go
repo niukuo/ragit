@@ -6,7 +6,7 @@ import (
 
 	"github.com/niukuo/ragit/refs"
 	"github.com/stretchr/testify/assert"
-	pb "go.etcd.io/etcd/raft/raftpb"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 func TestCheckAndGetChangeMembers(t *testing.T) {

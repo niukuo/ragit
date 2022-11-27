@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/v3"
 )
 
 type Status raft.Status

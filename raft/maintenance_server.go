@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	serverpb "go.etcd.io/etcd/etcdserver/etcdserverpb"
-	"go.etcd.io/etcd/raft"
+	serverpb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/raft/v3"
 )
 
 var ErrNotImplemented = errors.New("Not Implemented")
@@ -96,5 +96,10 @@ func (ms *maintenanceServer) Snapshot(
 
 func (ms *maintenanceServer) MoveLeader(
 	context.Context, *serverpb.MoveLeaderRequest) (*serverpb.MoveLeaderResponse, error) {
+	return nil, ErrNotImplemented
+}
+
+func (ms *maintenanceServer) Downgrade(
+	context.Context, *serverpb.DowngradeRequest) (*serverpb.DowngradeResponse, error) {
 	return nil, ErrNotImplemented
 }

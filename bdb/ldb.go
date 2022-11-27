@@ -11,8 +11,8 @@ import (
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"github.com/syndtr/goleveldb/leveldb/util"
-	"go.etcd.io/etcd/raft"
-	pb "go.etcd.io/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/v3"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
 type LdbWALStorage = *ldbWALStorage
@@ -339,7 +339,7 @@ func (s *ldbWALStorage) Term(i uint64) (uint64, error) {
 }
 
 func (s *ldbWALStorage) FirstIndex() (uint64, error) {
-        return atomic.LoadUint64(&s.firstIndex) + 1, nil
+	return atomic.LoadUint64(&s.firstIndex) + 1, nil
 }
 
 func (s *ldbWALStorage) LastIndex() (uint64, error) {

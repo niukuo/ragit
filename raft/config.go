@@ -3,8 +3,8 @@ package raft
 import (
 	"time"
 
-	"go.etcd.io/etcd/pkg/types"
-	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/client/pkg/v3/types"
+	"go.etcd.io/etcd/raft/v3"
 )
 
 type Config = *config
