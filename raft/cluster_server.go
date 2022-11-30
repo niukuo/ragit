@@ -4,15 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
 	serverpb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	"go.etcd.io/etcd/client/pkg/v3/types"
+	"go.etcd.io/etcd/raft/v3"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	"google.golang.org/grpc"
 )
 
 var _ serverpb.ClusterServer = (*clusterServer)(nil)
+
+const (
+	clusterPrefix = "/etcdserverpb.Cluster/"
+)
 
 type ClusterServer = *clusterServer
 
@@ -28,6 +36,7 @@ type ServerConfig struct {
 
 	storage Storage
 	raft    Raft
+	channel RpcChannel
 
 	newMemberID func(addr []string) PeerID
 }
@@ -249,5 +258,62 @@ func (cs *clusterServer) header(ctx context.Context) *serverpb.ResponseHeader {
 		ClusterId: uint64(cs.clusterId),
 		MemberId:  uint64(cs.id),
 		RaftTerm:  term,
+	}
+}
+
+func (cs *clusterServer) forwardToLeader(ctx context.Context, method string, req interface{}) (interface{}, error) {
+
+	var resp interface{}
+
+	switch strings.TrimPrefix(method, clusterPrefix) {
+	case "MemberList":
+		resp = new(serverpb.MemberListResponse)
+	case "MemberAdd":
+		resp = new(serverpb.MemberAddResponse)
+	case "MemberRemove":
+		resp = new(serverpb.MemberRemoveResponse)
+	case "MemberPromote":
+		resp = new(serverpb.MemberPromoteResponse)
+	case "MemberUpdate":
+		resp = new(serverpb.MemberUpdateResponse)
+	}
+
+	if err := cs.channel.Invoke(ctx, method, req, resp); err != nil {
+		return nil, err
+	}
+
+	return resp, nil
+}
+
+func NewMemberUnaryInterceptor(cs ClusterServer) grpc.UnaryServerInterceptor {
+
+	return func(
+		ctx context.Context,
+		req interface{},
+		info *grpc.UnaryServerInfo,
+		handler grpc.UnaryHandler) (interface{}, error) {
+
+		if strings.HasPrefix(info.FullMethod, clusterPrefix) {
+
+			var s Status
+			if err := cs.raft.withPipeline(ctx, func(node *raft.RawNode) error {
+				s = Status(node.Status())
+				return nil
+
+			}); err != nil {
+				return nil, err
+			}
+
+			switch s.RaftState {
+			case raft.StateLeader:
+				return handler(ctx, req)
+			case raft.StateFollower:
+				return cs.forwardToLeader(ctx, info.FullMethod, req)
+			default:
+				return nil, fmt.Errorf("cannot handle, state: %s", s.RaftState)
+			}
+		}
+
+		return handler(ctx, req)
 	}
 }

@@ -114,6 +114,10 @@ func (rc *readyHandler) getLeaderStat(w http.ResponseWriter, r *http.Request) {
 	encoder.Encode(stat)
 }
 
+func (rc *readyHandler) getForwardStat(w http.ResponseWriter, r *http.Request) {
+	rc.channel.Describe(w)
+}
+
 func (rc *readyHandler) getStatus(w http.ResponseWriter, r *http.Request) {
 	rc.raft.Describe(w)
 

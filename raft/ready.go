@@ -67,6 +67,7 @@ type readyHandler struct {
 	executor  Executor
 	confIndex uint64
 
+	channel *Channel
 	ClusterServer
 	MaintenanceServer
 
@@ -120,12 +121,15 @@ func RunNode(c Config,
 		ErrorC:      make(chan error, 1),
 	}
 
+	channel := NewChannel(c.Storage)
+
 	serverConfig := ServerConfig{
 		clusterId: c.ClusterID,
 		id:        id,
 
 		storage: c.Storage,
 		raft:    r,
+		channel: channel,
 
 		newMemberID: refs.DefaultNewMemberID,
 	}
@@ -152,6 +156,7 @@ func RunNode(c Config,
 
 		confIndex: state.ConfIndex,
 
+		channel:           channel,
 		ClusterServer:     NewClusterServer(serverConfig),
 		MaintenanceServer: NewMaintenanceServer(serverConfig),
 
@@ -192,6 +197,8 @@ func RunNode(c Config,
 		if err := rc.raft.Error(); err != nil {
 			e = err
 		}
+
+		rc.channel.Close()
 
 		<-rc.executor.Done()
 		if err := rc.executor.Error(); err != nil {
@@ -393,6 +400,12 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 				rc.executor.OnLeaderStart(hardState.Term)
 			} else if from == raft.StateLeader && to != raft.StateLeader {
 				rc.executor.OnLeaderStop()
+			}
+
+			if leader != PeerID(0) && to == raft.StateFollower {
+				rc.channel.Update(leader)
+			} else {
+				rc.channel.ResetConn()
 			}
 		}
 
@@ -761,6 +774,7 @@ func (rc *readyHandler) InitRouter(mux *http.ServeMux) {
 	mux.HandleFunc("/raft/snapshot", rc.getSnapshot)
 	mux.HandleFunc("/raft/server_stat", rc.getServerStat)
 	mux.HandleFunc("/raft/leader_stat", rc.getLeaderStat)
+	mux.HandleFunc("/raft/forward_stat", rc.getForwardStat)
 	mux.HandleFunc("/raft/members", rc.getMemberStatus)
 	rc.raft.InitRouter(mux)
 }

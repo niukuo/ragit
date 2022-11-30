@@ -3,6 +3,7 @@ package raft
 import (
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
+	"google.golang.org/grpc"
 )
 
 type NodeOptions interface {
@@ -39,5 +40,11 @@ func WithTxnLocker(txnLocker MapLocker) NodeOptions {
 func WithTLSInfo(tlsInfo transport.TLSInfo) NodeOptions {
 	return readyOptions(func(r *readyHandler) {
 		r.transport.TLSInfo = tlsInfo
+	})
+}
+
+func WithDialOptions(options ...grpc.DialOption) NodeOptions {
+	return readyOptions(func(r *readyHandler) {
+		r.channel.dialOptions = options
 	})
 }

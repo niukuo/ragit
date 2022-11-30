@@ -92,7 +92,11 @@ func main() {
 	c.StateMachine = storage
 	c.PeerListenURLs = peerListenURLs
 
-	node, err := raft.RunNode(c)
+	dialOptions := []grpc.DialOption{
+		grpc.WithInsecure(),
+	}
+
+	node, err := raft.RunNode(c, raft.WithDialOptions(dialOptions...))
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -111,11 +115,10 @@ func main() {
 	)
 
 	gwmux := runtime.NewServeMux()
-	opt := []grpc.DialOption{grpc.WithInsecure()}
-	if err := gw.RegisterClusterHandlerFromEndpoint(context.Background(), gwmux, addr, opt); err != nil {
+	if err := gw.RegisterClusterHandlerFromEndpoint(context.Background(), gwmux, addr, dialOptions); err != nil {
 		log.Fatalln(err)
 	}
-	if err := gw.RegisterMaintenanceHandlerFromEndpoint(context.Background(), gwmux, addr, opt); err != nil {
+	if err := gw.RegisterMaintenanceHandlerFromEndpoint(context.Background(), gwmux, addr, dialOptions); err != nil {
 		log.Fatal(err)
 	}
 
@@ -131,8 +134,9 @@ func main() {
 	grpcL := m.MatchWithWriters(cmux.HTTP2MatchHeaderFieldPrefixSendSettings("content-type", "application/grpc"))
 	httpL := m.Match(cmux.HTTP1Fast())
 
-	grpcServer := grpc.NewServer()
-	serverpb.RegisterClusterServer(grpcServer, node.ClusterService())
+	cs := node.ClusterService()
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(raft.NewMemberUnaryInterceptor(cs)))
+	serverpb.RegisterClusterServer(grpcServer, cs)
 	serverpb.RegisterMaintenanceServer(grpcServer, node.MaintenanceService())
 
 	httpServer := http.Server{
