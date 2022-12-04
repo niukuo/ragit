@@ -204,7 +204,7 @@ func (cs *clusterServer) MemberList(
 	for _, member := range state.Members {
 		pbMembers = append(pbMembers, &serverpb.Member{
 			ID:         uint64(member.ID),
-			Name:       member.ID.String(),
+			Name:       member.ID.Format(),
 			PeerURLs:   member.PeerURLs,
 			ClientURLs: member.PeerURLs,
 			IsLearner:  learners[member.ID],

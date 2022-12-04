@@ -1029,7 +1029,7 @@ func (s *storage) Describe(w io.Writer) {
 				"vote": &vote,
 			})
 			fmt.Fprintln(w, "term:", term)
-			fmt.Fprintln(w, "vote:", ragit.PeerID(vote))
+			fmt.Fprintln(w, "vote:", ragit.PeerID(vote).Format())
 		}
 
 		metab := tx.Bucket(BucketMeta)
@@ -1056,7 +1056,7 @@ func (s *storage) Describe(w io.Writer) {
 					if i != 0 {
 						fmt.Fprint(w, " ")
 					}
-					fmt.Fprint(w, ragit.PeerID(peer))
+					fmt.Fprint(w, ragit.PeerID(peer).Format())
 				}
 				fmt.Fprintln(w, "]")
 			}
@@ -1075,7 +1075,7 @@ func (s *storage) Describe(w io.Writer) {
 			}
 			strMemberURLs := make(map[string][]string, len(memberURLs))
 			for id, us := range memberURLs {
-				strMemberURLs[id.String()] = us
+				strMemberURLs[id.Format()] = us
 			}
 
 			fmt.Fprint(w, "members: ")

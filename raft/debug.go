@@ -176,7 +176,7 @@ func (rc *raftNode) Describe(w io.Writer) {
 	default:
 		if status != nil {
 			fmt.Fprintln(w, "state:", status.RaftState)
-			fmt.Fprintln(w, "leader:", PeerID(status.Lead))
+			fmt.Fprintln(w, "leader:", PeerID(status.Lead).Format())
 		} else {
 			fmt.Fprintln(w, "state: init")
 		}
@@ -218,11 +218,11 @@ func (rc *raftNode) Describe(w io.Writer) {
 	for _, rep := range replicators {
 		switch rep.typ {
 		case raft.ProgressTypePeer:
-			fmt.Fprintf(w, "replicator@%s: ", rep.id)
+			fmt.Fprintf(w, "replicator@%s: ", rep.id.Format())
 		case raft.ProgressTypeLearner:
-			fmt.Fprintf(w, "learner@%s: ", rep.id)
+			fmt.Fprintf(w, "learner@%s: ", rep.id.Format())
 		default:
-			fmt.Fprintf(w, "%v@%s: ", rep.typ, rep.id)
+			fmt.Fprintf(w, "%v@%s: ", rep.typ, rep.id.Format())
 		}
 
 		switch state := rep.pr.State; state {

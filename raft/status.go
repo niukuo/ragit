@@ -47,8 +47,8 @@ func (s Status) MemberStatus(
 	}
 
 	mstatus := &MemberStatus{
-		ID:        PeerID(s.ID).String(),
-		Lead:      PeerID(s.Lead).String(),
+		ID:        PeerID(s.ID).Format(),
+		Lead:      PeerID(s.Lead).Format(),
 		Commit:    s.Commit,
 		RaftState: s.RaftState.String(),
 
@@ -63,11 +63,11 @@ func (s Status) MemberStatus(
 			State:     v.State.String(),
 			IsLearner: v.IsLearner,
 		}
-		mstatus.Progress[PeerID(k).String()] = tracker
+		mstatus.Progress[PeerID(k).Format()] = tracker
 	}
 
 	for id, us := range memberURLs {
-		mstatus.Members[id.String()] = us
+		mstatus.Members[id.Format()] = us
 	}
 
 	return mstatus, nil
