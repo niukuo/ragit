@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"time"
+
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/client/pkg/v3/transport"
 	"google.golang.org/grpc"
@@ -46,5 +48,11 @@ func WithTLSInfo(tlsInfo transport.TLSInfo) NodeOptions {
 func WithDialOptions(options ...grpc.DialOption) NodeOptions {
 	return readyOptions(func(r *readyHandler) {
 		r.channel.dialOptions = options
+	})
+}
+
+func WithReadIndexTimeout(d time.Duration) NodeOptions {
+	return readyOptions(func(r *readyHandler) {
+		r.readIndexTimeout = d
 	})
 }

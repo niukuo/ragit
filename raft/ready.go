@@ -60,7 +60,10 @@ type readyHandler struct {
 
 	readIndexIDGen *idutil.Generator
 	readIndexNext  unsafe.Pointer
-	readIndexDoing *readIndexState
+	// if readIndexTimer is running, readIndexDoing is always not nil
+	readIndexDoing   *readIndexState
+	readIndexTimer   *time.Timer
+	readIndexTimeout time.Duration
 
 	txnLocker MapLocker
 
@@ -151,6 +154,7 @@ func RunNode(c Config,
 			proposed:  make(chan struct{}),
 			done:      make(chan struct{}),
 		}),
+		readIndexTimeout: 2 * time.Second,
 
 		txnLocker: NewMapLocker(),
 
@@ -181,6 +185,12 @@ func RunNode(c Config,
 	rc.raftLogger.Info("starting raft instance, applied_index: ", state.AppliedIndex,
 		", conf_index: ", state.ConfIndex,
 		", conf_state: ", state.ConfState)
+
+	timer := time.NewTimer(0)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	rc.readIndexTimer = timer
 
 	startChan := make(chan struct{})
 	rc.Runner = StartRunner(func(stopC <-chan struct{}) error {
@@ -371,9 +381,12 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 				rstate.err = err
 				close(rstate.done)
 			} else {
-				rc.readIndexDoing = rstate
+				rc.readIndexStart(rstate, rc.readIndexTimeout)
 			}
 			continue
+
+		case <-rc.readIndexTimer.C:
+			rc.readIndexClear(errors.New("readIndex timeout"), false)
 
 		case ch := <-rc.readyC:
 			select {
@@ -412,10 +425,7 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 		for _, rstate := range rd.ReadStates {
 			id := binary.BigEndian.Uint64(rstate.RequestCtx)
 			if rc.readIndexDoing != nil && rc.readIndexDoing.id == id {
-				state := rc.readIndexDoing
-				rc.readIndexDoing = nil
-				state.index = rstate.Index
-				close(state.done)
+				rc.readIndexFire(rstate.Index)
 			} else {
 				rc.raftLogger.Info("read index",
 					", id: ", id,
@@ -428,12 +438,10 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			if rc.readIndexDoing != nil &&
 				rc.readIndexDoing.term != hardState.Term {
 				state := rc.readIndexDoing
-				rc.readIndexDoing = nil
-				state.err = &errTermChanged{
+				rc.readIndexClear(&errTermChanged{
 					expTerm: state.term,
 					curTerm: hardState.Term,
-				}
-				close(state.done)
+				}, true)
 				rc.raftLogger.Warning("read index term changed",
 					", id: ", strconv.FormatUint(state.id, 16),
 					", term: ", state.term,
@@ -516,6 +524,39 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			return nil
 		}
 	}
+}
+
+func (rc *readyHandler) readIndexStart(state *readIndexState, d time.Duration) {
+	rc.readIndexDoing = state
+	rc.readIndexTimer.Reset(d)
+}
+
+func (rc *readyHandler) readIndexFire(index uint64) {
+	state := rc.readIndexDoing
+	rc.readIndexDoing = nil
+	if !rc.readIndexTimer.Stop() {
+		select {
+		case <-rc.readIndexTimer.C:
+		default:
+			panic("readIndexTimer stop failed")
+		}
+	}
+	state.index = index
+	close(state.done)
+}
+
+func (rc *readyHandler) readIndexClear(err error, stop bool) {
+	state := rc.readIndexDoing
+	rc.readIndexDoing = nil
+	if stop && !rc.readIndexTimer.Stop() {
+		select {
+		case <-rc.readIndexTimer.C:
+		default:
+			panic("readIndexTimer stop failed")
+		}
+	}
+	state.err = err
+	close(state.done)
 }
 
 func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
