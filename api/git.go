@@ -13,6 +13,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os/exec"
+	"path"
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/format/packfile"
@@ -163,16 +164,16 @@ func (h *httpGitAPI) GetRefs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", fmt.Sprintf("application/x-%s-advertisement", svcStr))
 
-	memberStatus, err := h.getMemberStatus(r.Context())
+	index, err := h.node.ReadIndex(r.Context())
 	if err != nil {
+		h.logger.Errorf("WaitRead failed, err: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	isLead := memberStatus.ID == memberStatus.Lead
-	if !isLead {
-		errMessage := fmt.Sprintf("node:%s is not leader: %s, not allow read or write", memberStatus.ID, memberStatus.Lead)
-		h.logger.Errorf(errMessage)
-		http.Error(w, errMessage, http.StatusForbidden)
+	sm := h.rdb.(bdb.Storage)
+	if err := sm.WaitForApplyIndex(r.Context(), index); err != nil {
+		h.logger.Errorf("WaitForApplyIndex failed, err: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -190,9 +191,15 @@ func (h *httpGitAPI) GetRefs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
-
 	req := packp.NewReferenceUpdateRequest()
 	var reader io.Reader = r.Body
+
+	sm := h.rdb.(bdb.Storage)
+	isLead := sm.GetLeaderTerm() != 0
+	if !isLead {
+		h.forwardToLeader(r.Context(), w)
+		return
+	}
 
 	if r.ContentLength == 4 {
 		c, err := ioutil.ReadAll(reader)
@@ -273,19 +280,6 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *httpGitAPI) UploadPack(w http.ResponseWriter, r *http.Request) {
-	memberStatus, err := h.getMemberStatus(r.Context())
-	if err != nil {
-		refs.ReportUploadPackError(w, err.Error())
-		return
-	}
-	isLead := memberStatus.ID == memberStatus.Lead
-	if !isLead {
-		errMessage := fmt.Sprintf("node:%s is not leader: %s, not allow read", memberStatus.ID, memberStatus.Lead)
-		h.logger.Errorf(errMessage)
-		refs.ReportUploadPackError(w, errMessage)
-		return
-	}
-
 	h.serviceRPC(w, r, "upload-pack")
 }
 
@@ -339,21 +333,26 @@ func (h *httpGitAPI) serviceRPC(w http.ResponseWriter, r *http.Request, service 
 	}
 }
 
-func (h *httpGitAPI) getMemberStatus(ctx context.Context) (*raft.MemberStatus, error) {
+func (h *httpGitAPI) forwardToLeader(ctx context.Context, w http.ResponseWriter) {
 	status, err := h.node.GetStatus(ctx)
 	if err != nil {
 		h.logger.Errorf("get status failed, err: %v", err)
-		return nil, err
+		refs.ReportReceivePackError(w, err.Error())
+		return
 	}
 
-	storage := h.rdb.(bdb.Storage)
-	memberStatus, err := status.MemberStatus(storage.GetAllMemberURLs)
+	sm := h.rdb.(bdb.Storage)
+	leaderAddrs, err := sm.GetURLsByMemberID(refs.PeerID(status.Lead))
 	if err != nil {
-		h.logger.Errorf("status.MemberStatus failed, err: %v", err)
-		return nil, err
+		h.logger.Errorf("get leaderAddrs failed, err: %v", err)
+		refs.ReportReceivePackError(w, err.Error())
+		return
 	}
 
-	return memberStatus, nil
+	w.Header().Set("Location", fmt.Sprintf("%s/%s/git-receive-pack",
+		leaderAddrs[0], path.Base(h.path)))
+
+	w.WriteHeader(http.StatusFound)
 }
 
 func (h *httpGitAPI) checkLimitSize(content []byte) error {
