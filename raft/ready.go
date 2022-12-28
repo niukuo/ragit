@@ -387,6 +387,7 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 
 		case <-rc.readIndexTimer.C:
 			rc.readIndexClear(errors.New("readIndex timeout"), false)
+			continue
 
 		case ch := <-rc.readyC:
 			select {
