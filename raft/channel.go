@@ -134,6 +134,14 @@ func (c *Channel) refresh() error {
 	c.lead = tolead
 	c.conns = make([]*grpc.ClientConn, 0)
 
+	lastIndex, err := c.storage.LastIndex()
+	if err != nil {
+		return err
+	}
+	if lastIndex == 0 {
+		return nil
+	}
+
 	us, err := c.storage.GetURLsByMemberID(c.lead)
 	if err != nil {
 		return err

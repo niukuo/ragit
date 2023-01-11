@@ -32,12 +32,22 @@ func TestRefresh(t *testing.T) {
 	c.Update(PeerID(0))
 	s.NoError(c.refresh())
 
+	idx0 := uint64(0)
+	idx100 := uint64(100)
 	c.Update(PeerID(123))
+	mockStorage.On("LastIndex").Return(idx0, errors.New("bdb error")).Once()
+	s.Error(c.refresh())
+
+	mockStorage.On("LastIndex").Return(idx0, nil).Once()
+	s.NoError(c.refresh())
+
+	mockStorage.On("LastIndex").Return(idx100, nil).Once()
 	mockStorage.On("GetURLsByMemberID", PeerID(123)).Return(
 		nil, errors.New("not found")).Once()
 	s.Error(c.refresh())
 
 	// partial connected
+	mockStorage.On("LastIndex").Return(idx100, nil).Once()
 	mockStorage.On("GetURLsByMemberID", PeerID(123)).Return([]string{
 		"http://127.0.0.1:1234",
 		"http://[::1]:1235",
@@ -60,6 +70,8 @@ func TestRefresh(t *testing.T) {
 	// update before do reset
 	c.ResetConn()
 	c.Update(PeerID(123))
+
+	mockStorage.On("LastIndex").Return(idx100, nil).Once()
 	mockStorage.On("GetURLsByMemberID", PeerID(123)).Return([]string{
 		"http://127.0.0.1:1234",
 	}, nil).Once()
