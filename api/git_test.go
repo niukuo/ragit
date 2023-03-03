@@ -19,6 +19,12 @@ func TestCheckLimitSize(t *testing.T) {
 		maxPackSize: DefaultMaxPackSize,
 	}
 
+	err = h.checkLimitSize(nil)
+	s.Error(err)
+
+	err = h.checkLimitSize([]byte{})
+	s.Error(err)
+
 	err = h.checkLimitSize(content)
 	s.NoError(err)
 

@@ -252,10 +252,14 @@ func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.checkLimitSize(content); err != nil {
-		h.logger.Errorf("check size failed, err: %v", err)
-		refs.ReportReceivePackError(w, err.Error())
-		return
+	if len(content) > 0 {
+		if err := h.checkLimitSize(content); err != nil {
+			h.logger.Errorf("check size failed, err: %v", err)
+			refs.ReportReceivePackError(w, err.Error())
+			return
+		}
+	} else {
+		content = nil
 	}
 
 	writerCh := make(chan io.Writer)

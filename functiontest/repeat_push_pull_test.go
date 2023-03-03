@@ -171,38 +171,59 @@ func (s *GitServerFT) TearDownSuite() {
 	s.gitServer.Stop()
 }
 
+func execCmd(ops, dataDir string) ([]byte, error) {
+	cmd := exec.Command("/bin/bash", "-c", ops)
+	cmd.Dir = dataDir
+	return cmd.CombinedOutput()
+}
+
 func (s *GitServerFT) TestRepeatPushAndPull() {
 	dataDir, err := ioutil.TempDir("", "data")
 	s.NoError(err)
 	defer os.RemoveAll(dataDir)
 
 	initRepo := "mkdir pullPath;mkdir pushPath;cd pullPath;git init;git remote add origin http://127.0.0.1:9022/repo.git;cd ../pushPath;git init;git remote add origin http://127.0.0.1:9022/repo.git"
-	cmd := exec.Command("/bin/bash", "-c", initRepo)
-	cmd.Dir = dataDir
-	s.NoError(cmd.Run())
+	stdout, err := execCmd(initRepo, dataDir)
+	s.NoError(err, string(stdout))
 
 	gitConfig := "cd pushPath; git config user.email abc@alibaba.com; git config user.name abc; cd ../pullPath; git config user.email abc@alibaba.com; git config user.name abc"
-	cmd = exec.Command("/bin/bash", "-c", gitConfig)
-	cmd.Dir = dataDir
-	s.NoError(cmd.Run())
+	stdout, err = execCmd(gitConfig, dataDir)
+	s.NoError(err, string(stdout))
 
 	for i := 0; i < 10; i++ {
 		push := "cd pushPath; echo a >> a.txt; git add a.txt; git commit -m a; git push origin HEAD"
-		cmd := exec.Command("/bin/bash", "-c", push)
-		cmd.Dir = dataDir
-		stdout, err := cmd.CombinedOutput()
+		stdout, err := execCmd(push, dataDir)
 		s.NoError(err, string(stdout))
 
 		pull := "cd pullPath; git pull origin master"
-		cmd = exec.Command("/bin/bash", "-c", pull)
-		cmd.Dir = dataDir
-		stdout, err = cmd.CombinedOutput()
+		stdout, err = execCmd(pull, dataDir)
 		s.NoError(err, string(stdout))
 
 		diff := "diff pullPath/a.txt pushPath/a.txt"
-		cmd = exec.Command("/bin/bash", "-c", diff)
-		cmd.Dir = dataDir
-		stdout, err = cmd.CombinedOutput()
+		stdout, err = execCmd(diff, dataDir)
+		s.NoError(err, string(stdout))
+
+		tagName := fmt.Sprintf("testTags%d", i)
+		creatTags := fmt.Sprintf("cd pushPath; git tag -a %s -m tags; git push --tags origin %s", tagName, tagName)
+		stdout, err = execCmd(creatTags, dataDir)
+		s.NoError(err, string(stdout))
+
+		getRemoteTags := fmt.Sprintf("cd pushPath; git ls-remote --tags origin %s", tagName)
+		stdout, err = execCmd(getRemoteTags, dataDir)
+		s.NoError(err, string(stdout))
+		s.True(strings.Contains(string(stdout), tagName))
+
+		delRemoteTags := fmt.Sprintf("cd pushPath; git push --delete origin %s", tagName)
+		stdout, err = execCmd(delRemoteTags, dataDir)
+		s.NoError(err, string(stdout))
+
+		getRemoteTags = fmt.Sprintf("cd pushPath; git ls-remote --tags origin %s", tagName)
+		stdout, err = execCmd(getRemoteTags, dataDir)
+		s.NoError(err, string(stdout))
+		s.False(strings.Contains(string(stdout), tagName))
+
+		delOnly := "cd pushPath; git push origin --delete master"
+		stdout, err = execCmd(delOnly, dataDir)
 		s.NoError(err, string(stdout))
 	}
 }
