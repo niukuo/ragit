@@ -11,6 +11,7 @@ import (
 	"path"
 	"sort"
 	"syscall"
+	"time"
 
 	"github.com/go-git/go-billy/v5/osfs"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -66,6 +67,8 @@ func NewListener(dir string, logger logging.Logger, opts ...Options) (Listener, 
 }
 
 func (l *listener) Apply(oplog refs.Oplog, handle refs.ReqHandle) error {
+
+	start := time.Now()
 
 	cmd := exec.Command("git", "receive-pack", "--stateless-rpc", ".")
 	cmd.Dir = l.dir
@@ -149,6 +152,8 @@ func (l *listener) Apply(oplog refs.Oplog, handle refs.ReqHandle) error {
 		l.logger.Warning("refs not updated, err: ", err)
 		return err
 	}
+
+	applySeconds.Observe(time.Since(start).Seconds())
 
 	return nil
 
@@ -355,6 +360,8 @@ func (l *listener) fetchObjects(ctx context.Context,
 	s transport.UploadPackSession,
 	req *packp.UploadPackRequest,
 ) (err error) {
+	start := time.Now()
+
 	plumbing.HashesSort(req.Wants)
 	plumbing.HashesSort(req.Haves)
 
@@ -373,6 +380,8 @@ func (l *listener) fetchObjects(ctx context.Context,
 		l.logger.Warning("[FetchObjects] save pack failed, err: ", err)
 		return err
 	}
+
+	fetchObjectsSeconds.Observe(time.Since(start).Seconds())
 
 	return nil
 }

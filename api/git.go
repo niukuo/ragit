@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path"
+	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/format/packfile"
@@ -384,4 +385,19 @@ func (h *httpGitAPI) checkLimitSize(content []byte) error {
 	}
 
 	return nil
+}
+
+func (h *httpGitAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	path := r.URL.Path
+	method := r.Method
+
+	requestCounter.WithLabelValues(method, path).Inc()
+	doingRequest.WithLabelValues(method, path).Inc()
+	defer func() {
+		doingRequest.WithLabelValues(method, path).Dec()
+		requestSeconds.WithLabelValues(method, path).Observe(time.Since(start).Seconds())
+	}()
+
+	h.ServeMux.ServeHTTP(w, r)
 }

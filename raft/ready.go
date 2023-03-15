@@ -397,6 +397,8 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			}
 		}
 
+		start := time.Now()
+
 		if fields := readyForLogger(rd); fields != nil {
 			rc.raftLogger.Info(fields...)
 		}
@@ -518,6 +520,8 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 				return err
 			}
 		}
+
+		serveReadySeconds.Observe(time.Since(start).Seconds())
 
 		select {
 		case rc.advanceC <- struct{}{}:
