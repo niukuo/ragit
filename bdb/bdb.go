@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"sort"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"go.etcd.io/bbolt"
 	"go.etcd.io/etcd/raft/v3"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
 var (
@@ -44,9 +46,12 @@ type storage struct {
 
 	leaderTerm uint64
 
-	logger logging.Logger
-
 	applyWaits *waitApplyRequests
+
+	subMgr atomic.Pointer[subMgr]
+
+	// logger is always the last member in struct
+	logger logging.Logger
 }
 
 type Options struct {
@@ -97,7 +102,8 @@ func Open(path string,
 		db:         db,
 
 		applyWaits: newWaitApplyRequests(100, opts.Logger),
-		logger:     opts.Logger,
+
+		logger: opts.Logger,
 	}
 
 	err = s.initBuckets(opts.NewLocalID)
@@ -109,6 +115,79 @@ func Open(path string,
 	if err != nil {
 		return nil, err
 	}
+
+	initState, err := s.GetInitState()
+	if err != nil {
+		return nil, err
+	}
+
+	cap := 100 // TODO
+
+	firstIndex, err := wal.FirstIndex()
+	if err != nil {
+		return nil, err
+	}
+	if firstIndex+uint64(cap) < initState.AppliedIndex {
+		firstIndex = initState.AppliedIndex - uint64(cap)
+	}
+
+	entries, err := wal.Entries(firstIndex, initState.AppliedIndex+1, math.MaxUint64)
+	if err != nil {
+		return nil, err
+	}
+
+	var cacheAppliedIndex uint64 = firstIndex - 1
+
+	if l := len(entries); l > 0 {
+		if lastIndex := entries[l-1].Index; lastIndex != initState.AppliedIndex {
+			return nil, fmt.Errorf("last index not match, %d(last) != %d(applied)", lastIndex, initState.AppliedIndex)
+		}
+		if cacheAppliedIndex+1 != entries[0].Index {
+			return nil, fmt.Errorf("first index not match, %d(exp) != %d(act)", cacheAppliedIndex+1, entries[0].Index)
+		}
+		s.logger.Info("filling subscriber cache",
+			", firstIndex: ", entries[0].Index,
+			", lastIndex: ", entries[l-1].Index,
+			", appliedIndex: ", initState.AppliedIndex,
+		)
+	} else {
+		lastIndex, _ := wal.LastIndex()
+		if cacheAppliedIndex != initState.AppliedIndex {
+			if lastIndex > firstIndex {
+				return nil, fmt.Errorf("first index and applied index not match, %d != %d, last = %d",
+					firstIndex-1, initState.AppliedIndex, lastIndex)
+			}
+			cacheAppliedIndex = initState.AppliedIndex
+		}
+		s.logger.Info("no wal, not filling cache",
+			", firstIndex: ", firstIndex,
+			", lastIndex: ", lastIndex,
+			", appliedIndex: ", initState.AppliedIndex,
+		)
+	}
+
+	subMgr := newSubMgr(cacheAppliedIndex,
+		WithSubMgrLogger(s.logger),
+		WithSubMgrCap(cap),
+	)
+
+	for _, entry := range entries {
+		if entry.Type != pb.EntryNormal {
+			continue
+		}
+		oplog := &refs.Oplog{}
+		if err := proto.Unmarshal(entry.Data, oplog); err != nil {
+			return nil, err
+		}
+		subMgr.push(entry.Term, entry.Index, oplog)
+	}
+
+	if subMgr.nextKey != initState.AppliedIndex {
+		return nil, fmt.Errorf("applied index not match, %d(exp) != %d",
+			initState.AppliedIndex, subMgr.nextKey)
+	}
+
+	s.subMgr.Store(subMgr)
 
 	return s, nil
 }
@@ -602,6 +681,16 @@ func (s *storage) OnSnapshot(
 	s.applyWaits.applyConfIndex(snapshot.Metadata.Index)
 	s.applyWaits.applyDataIndex(snapshot.Metadata.Index)
 
+	cap := 100 // TODO
+
+	subMgr := newSubMgr(snapshot.Metadata.Index,
+		WithSubMgrLogger(s.logger),
+		WithSubMgrCap(cap),
+	)
+
+	subMgr = s.subMgr.Swap(subMgr)
+	subMgr.stop()
+
 	return nil
 
 }
@@ -743,6 +832,8 @@ func (s *storage) OnApply(term, index uint64, oplog *refs.Oplog, handle refs.Req
 	s.applyWaits.applyDataIndex(index)
 
 	s.WALStorage.SetSnapshotIndex(index)
+
+	s.subMgr.Load().push(term, index, oplog)
 
 	applyOplogSeconds.Observe(time.Since(start).Seconds())
 
@@ -963,6 +1054,76 @@ func (s *storage) Snapshot() (pb.Snapshot, error) {
 	}
 
 	return snapshot, nil
+}
+
+func (s *storage) StartSubscriber(ctx context.Context, appliedIndex uint64, outCh chan<- ragit.OpEvent) error {
+
+	subMgr := s.subMgr.Load()
+
+	var firstData map[string]refs.Hash
+
+	if err := s.db.View(func(tx *bbolt.Tx) error {
+		metab := tx.Bucket(BucketMeta)
+
+		var storedIndex uint64
+
+		getUint64(metab, map[string]*uint64{
+			"index": &storedIndex,
+		})
+
+		if appliedIndex == 0 {
+			allRefs := make(map[string]refs.Hash)
+			if err := getAllRefs(tx.Bucket(BucketRefs), allRefs); err != nil {
+				return err
+			}
+			if storedIndex != 0 {
+				appliedIndex = storedIndex
+				firstData = allRefs
+			} else if len(allRefs) > 0 {
+				return fmt.Errorf("appliedIndex = 0 with data %+v", allRefs)
+			}
+		} else if storedIndex < appliedIndex {
+			return fmt.Errorf("request index(%d) > applied index(%d)", appliedIndex, storedIndex)
+		}
+
+		return nil
+
+	}); err != nil {
+		return err
+	}
+
+	if firstData != nil {
+		event := ragit.OpEvent{
+			Index: appliedIndex,
+		}
+
+		for k, v := range firstData {
+			hash := v
+			event.Ops = append(event.Ops, &refs.Oplog_Op{
+				Name:   proto.String(k),
+				Target: hash[:],
+			})
+		}
+
+		sort.Slice(event.Ops, func(i, j int) bool {
+			return *event.Ops[i].Name < *event.Ops[j].Name
+		})
+
+		// not return error if channel is buffered
+		select {
+		case outCh <- event:
+		default:
+			select {
+			case outCh <- event:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+
+	go subMgr.runSubscriber(ctx, appliedIndex, outCh)
+
+	return nil
 }
 
 func (s *storage) GetAllRefs() (map[string]refs.Hash, error) {
