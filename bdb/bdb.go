@@ -679,7 +679,7 @@ func (s *storage) GetConfState() (*pb.ConfState, error) {
 	return &confState, nil
 }
 
-func (s *storage) OnApply(term, index uint64, oplog refs.Oplog, handle refs.ReqHandle) error {
+func (s *storage) OnApply(term, index uint64, oplog *refs.Oplog, handle refs.ReqHandle) error {
 	start := time.Now()
 
 	if err := s.db.Update(func(tx *bbolt.Tx) error {

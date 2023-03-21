@@ -1,6 +1,8 @@
 syntax = "proto2";
 package refs;
 
+option go_package = "github.com/niukuo/ragit/refs";
+
 message Oplog {
     message Op {
         required string name = 1;

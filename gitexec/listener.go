@@ -40,6 +40,8 @@ type listener struct {
 	logger    logging.Logger
 }
 
+var _ refs.Listener = (*listener)(nil)
+
 type Options func(l *listener)
 
 func WithGitClient(gitClient transport.Transport) Options {
@@ -66,7 +68,7 @@ func NewListener(dir string, logger logging.Logger, opts ...Options) (Listener, 
 	return l, nil
 }
 
-func (l *listener) Apply(oplog refs.Oplog, handle refs.ReqHandle) error {
+func (l *listener) Apply(oplog *refs.Oplog, handle refs.ReqHandle) error {
 
 	start := time.Now()
 

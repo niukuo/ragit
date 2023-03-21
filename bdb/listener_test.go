@@ -12,7 +12,7 @@ import (
 type emptyListener struct {
 }
 
-func (l *emptyListener) Apply(oplog refs.Oplog, handle refs.ReqHandle) error {
+func (l *emptyListener) Apply(oplog *refs.Oplog, handle refs.ReqHandle) error {
 	w := &bytes.Buffer{}
 	status := packp.ReportStatus{
 		UnpackStatus: "ok",

@@ -68,7 +68,7 @@ func (s *SMSuite) TestApply() {
 	s.NoError(err)
 	s.False(raft.IsEmptySnap(snapshot))
 
-	opAdd := refs.Oplog{
+	opAdd := &refs.Oplog{
 		Ops: []*refs.Oplog_Op{
 			{
 				Name:   proto.String("refs/heads/master"),
@@ -81,7 +81,7 @@ func (s *SMSuite) TestApply() {
 		},
 	}
 
-	opUpdateRemove := refs.Oplog{
+	opUpdateRemove := &refs.Oplog{
 		Ops: []*refs.Oplog_Op{
 			{
 				Name:      proto.String("refs/heads/master"),
