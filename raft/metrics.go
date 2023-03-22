@@ -38,4 +38,10 @@ var (
 		// highest bucket start of 0.01 sec * 2^11 = 20.48 sec
 		Buckets: prometheus.ExponentialBuckets(0.01, 2, 12),
 	})
+
+	leaderChanges = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "ragit",
+		Name:      "leader_changes_seen_total",
+		Help:      "The number of leader changes seen.",
+	})
 )

@@ -319,6 +319,8 @@ func (rc *raftNode) proposeConfChange(
 
 func (rc *raftNode) Propose(ctx context.Context, cmds []*packp.Command, pack []byte, handle refs.ReqHandle) (DoingRequest, error) {
 
+	start := time.Now()
+
 	if len(cmds) == 0 {
 		return nil, errors.New("empty cmds")
 	}
@@ -398,6 +400,11 @@ func (rc *raftNode) Propose(ctx context.Context, cmds []*packp.Command, pack []b
 		", term: ", req.term,
 		", expectedTerm: ", msg.expectedTerm,
 	)
+
+	proposeSeconds.Observe(time.Since(start).Seconds())
+	proposeCounter.Inc()
+
+	proposePackBytes.Observe(float64(len(pack)))
 
 	return req, nil
 }

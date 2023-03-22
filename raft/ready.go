@@ -413,6 +413,7 @@ func (rc *readyHandler) serveReady(stopC <-chan struct{}) error {
 			raftState = to
 			leader = PeerID(rd.SoftState.Lead)
 			if from != raft.StateLeader && to == raft.StateLeader {
+				leaderChanges.Inc()
 				rc.executor.OnLeaderStart(hardState.Term)
 			} else if from == raft.StateLeader && to != raft.StateLeader {
 				rc.executor.OnLeaderStop()
@@ -853,8 +854,6 @@ func (rc *readyHandler) getSnapshot(w http.ResponseWriter, r *http.Request) {
 
 func (rc *readyHandler) Propose(ctx context.Context, cmds []*packp.Command, pack []byte, handle refs.ReqHandle) (DoingRequest, error) {
 
-	start := time.Now()
-
 	term := rc.storage.GetLeaderTerm()
 	if term == 0 {
 		return nil, errors.New("not leader")
@@ -917,11 +916,6 @@ func (rc *readyHandler) Propose(ctx context.Context, cmds []*packp.Command, pack
 		return nil, err
 	}
 	unlocker = nil
-
-	proposeSeconds.Observe(time.Since(start).Seconds())
-	proposeCounter.Inc()
-
-	proposePackBytes.Observe(float64(len(pack)))
 
 	return req, nil
 }
