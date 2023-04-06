@@ -78,6 +78,7 @@ func (e *executor) OnLeaderStop() {
 func (e *executor) OnEntry(entry *pb.Entry) error {
 	select {
 	case e.entryCh <- entry:
+		executorEntryQueueSize.Inc()
 	case <-e.Runner.Done():
 		return ErrStopped
 	}
@@ -104,6 +105,7 @@ func (e *executor) OnSnapshot(snapshot pb.Snapshot, srcId PeerID) error {
 
 		for len(e.entryCh) > 0 {
 			<-e.entryCh
+			executorEntryQueueSize.Dec()
 		}
 
 		return nil
@@ -117,6 +119,7 @@ func (e *executor) Run(stopC <-chan struct{}) error {
 		case <-stopC:
 			return nil
 		case entry := <-e.entryCh:
+			executorEntryQueueSize.Dec()
 			// A new raft leader first tries to commit a no-op log entry
 			// to implicit commit previous-term logs and figure out current commitIndex.
 			if atomic.CompareAndSwapUint64(&e.leaderTerm, entry.Term, 0) {

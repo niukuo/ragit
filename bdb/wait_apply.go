@@ -47,6 +47,8 @@ func (w *waitApplyRequests) addRequest(waitIndex uint64) (*waitRequest, error) {
 		return nil, fmt.Errorf("pending wait request is more than %d", w.capacity)
 	}
 
+	waitForApplyRequests.Inc()
+
 	reqID := atomic.AddUint64(&w.waitReqID, 1)
 	resCh := make(chan struct{})
 
@@ -58,6 +60,8 @@ func (w *waitApplyRequests) addRequest(waitIndex uint64) (*waitRequest, error) {
 func (w *waitApplyRequests) delRequest(reqID uint64) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
+
+	waitForApplyRequests.Dec()
 
 	delete(w.requests, reqID)
 }

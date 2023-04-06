@@ -574,6 +574,8 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 		}
 	case pb.EntryConfChange:
 
+		// index and conf_index are stored in different places, and we use the index as AppliedIndex for raft restart.
+		// so we need to skip the conf change entry when the index is less than the conf_index.
 		if entry.Index <= rc.confIndex {
 			rc.storage.OnConfIndexChange(entry.Index)
 			break
@@ -954,13 +956,20 @@ func (rc *readyHandler) getMemberStatus(w http.ResponseWriter, r *http.Request) 
 
 func (rc *readyHandler) ReadIndex(ctx context.Context) (uint64, error) {
 
+	readIndexCounter.Inc()
+
+	start := time.Now()
+	defer func() { readIndexSeconds.Observe(time.Since(start).Seconds()) }()
+
 	state := rc.proposeReadIndex()
 
 	select {
 	case <-ctx.Done():
+		readIndexFailedCounter.Inc()
 		return 0, ctx.Err()
 	case <-state.done:
 		if err := state.err; err != nil {
+			readIndexFailedCounter.Inc()
 			return 0, err
 		}
 		return state.index, nil

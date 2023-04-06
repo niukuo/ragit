@@ -54,6 +54,8 @@ func (r *requestContextManager) Append(term, index uint64, msg *msgWithResult) e
 	r.requests = append(r.requests, req)
 	msg.req = req
 
+	proposedDoingRequest.Inc()
+
 	return nil
 }
 
@@ -76,6 +78,8 @@ func (r *requestContextManager) Take(term, index uint64) (*doingRequest, error) 
 	}
 
 	r.requests = r.requests[1:]
+
+	proposedDoingRequest.Dec()
 
 	if req.term != term {
 		req.fire(&errTermChanged{curTerm: term})
@@ -104,6 +108,7 @@ func (r *requestContextManager) Clear(err error) {
 	r.lock.Lock()
 	requests := r.requests
 	r.requests = nil
+	proposedDoingRequest.Set(0)
 	r.lock.Unlock()
 
 	for _, req := range requests {
