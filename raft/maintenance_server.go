@@ -3,12 +3,20 @@ package raft
 import (
 	"context"
 	"errors"
+	"time"
 
+	"github.com/niukuo/ragit/logging"
+	"github.com/niukuo/ragit/refs"
 	serverpb "go.etcd.io/etcd/api/v3/etcdserverpb"
+	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	"go.etcd.io/etcd/raft/v3"
+	pb "go.etcd.io/etcd/raft/v3/raftpb"
 )
 
-var ErrNotImplemented = errors.New("Not Implemented")
+var (
+	ErrNotImplemented        = errors.New("Not Implemented")
+	ErrTimeoutLeaderTransfer = errors.New("request timed out, leader transfer took too long")
+)
 
 var _ serverpb.MaintenanceServer = (*maintenanceServer)(nil)
 
@@ -16,11 +24,15 @@ type MaintenanceServer = *maintenanceServer
 
 type maintenanceServer struct {
 	c *ServerConfig
+
+	eventLogger logging.Logger
 }
 
 func NewMaintenanceServer(config ServerConfig) MaintenanceServer {
 	return &maintenanceServer{
 		c: &config,
+
+		eventLogger: logging.GetLogger("event.maintenance_server"),
 	}
 }
 
@@ -95,8 +107,42 @@ func (ms *maintenanceServer) Snapshot(
 }
 
 func (ms *maintenanceServer) MoveLeader(
-	context.Context, *serverpb.MoveLeaderRequest) (*serverpb.MoveLeaderResponse, error) {
-	return nil, ErrNotImplemented
+	ctx context.Context, request *serverpb.MoveLeaderRequest) (*serverpb.MoveLeaderResponse, error) {
+
+	if err := ms.c.raft.withPipeline(ctx, func(node *raft.RawNode) error {
+
+		s := Status(node.Status())
+
+		if ms.c.id != refs.PeerID(s.Lead) {
+			return rpctypes.ErrNotLeader
+		}
+
+		if transferee, ok := s.Progress[request.TargetID]; !ok || transferee.IsLearner {
+			return rpctypes.ErrBadLeaderTransferee
+		}
+
+		msg := pb.Message{Type: pb.MsgTransferLeader, From: request.TargetID, To: s.Lead}
+		if err := node.Step(msg); err != nil {
+			return err
+		}
+
+		return nil
+
+	}); err != nil {
+		return nil, err
+	}
+
+	for ms.c.storage.GetLeaderTerm() != 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ErrTimeoutLeaderTransfer
+		case <-time.After(1 * time.Second):
+		}
+	}
+
+	ms.eventLogger.Infof("move leader %d to %d", ms.c.id, request.TargetID)
+
+	return &serverpb.MoveLeaderResponse{}, nil
 }
 
 func (ms *maintenanceServer) Downgrade(
