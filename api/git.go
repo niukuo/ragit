@@ -357,7 +357,7 @@ func (h *httpGitAPI) forwardToLeader(ctx context.Context, w http.ResponseWriter)
 	w.Header().Set("Location", fmt.Sprintf("%s/%s/git-receive-pack",
 		leaderAddrs[0], path.Base(h.path)))
 
-	w.WriteHeader(http.StatusFound)
+	w.WriteHeader(http.StatusTemporaryRedirect)
 }
 
 func (h *httpGitAPI) checkLimitSize(content []byte) error {
