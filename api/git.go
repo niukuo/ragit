@@ -121,7 +121,7 @@ func (h *httpGitAPI) AdvertisedReferences(service Service) (*packp.AdvRefs, erro
 		return nil, err
 	}
 
-	if err := ar.Capabilities.Set(capability.Agent, capability.DefaultAgent); err != nil {
+	if err := ar.Capabilities.Set(capability.Agent, capability.DefaultAgent()); err != nil {
 		return nil, err
 	}
 
