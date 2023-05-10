@@ -12,6 +12,7 @@ import (
 
 type DoingRequest interface {
 	Done() <-chan struct{}
+	TermIndex() (uint64, uint64)
 	Err() error
 }
 
@@ -149,6 +150,10 @@ func (r *doingRequest) fire(err error) {
 		r.doneCb(err)
 	}
 	close(r.done)
+}
+
+func (r *doingRequest) TermIndex() (uint64, uint64) {
+	return r.term, r.index
 }
 
 func (r *doingRequest) Done() <-chan struct{} {
