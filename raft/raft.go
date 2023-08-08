@@ -12,12 +12,12 @@ import (
 	"unsafe"
 
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
-	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/raft/v3"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
 	"go.etcd.io/etcd/server/v3/etcdserver/api/rafthttp"
+	"google.golang.org/protobuf/proto"
 )
 
 var ErrStopped = errors.New("stopped")

@@ -4,10 +4,10 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/refs"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
 type Executor interface {

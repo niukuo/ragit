@@ -12,10 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/niukuo/ragit/refs"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/tracker"
+	"google.golang.org/protobuf/proto"
 )
 
 func (rc *readyHandler) getWAL(w http.ResponseWriter, r *http.Request) {

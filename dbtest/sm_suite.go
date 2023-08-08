@@ -5,12 +5,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gogo/protobuf/proto"
 	ragit "github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
 	"github.com/stretchr/testify/suite"
 	"go.etcd.io/etcd/raft/v3"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
 type Storage interface {
