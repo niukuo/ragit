@@ -16,9 +16,9 @@ var (
 		Namespace: "ragit",
 		Name:      "propose_duration_seconds",
 		Help:      "The latency distributions of propose oplogs",
-		// lowest bucket start of upper bound 0.01 sec (10ms) with factor 2
-		// highest bucket start of 0.01 sec * 2^11 = 20.48 sec
-		Buckets: prometheus.ExponentialBuckets(0.01, 2, 12),
+		// lowest bucket start of upper bound 0.001 sec (1ms) with factor 2
+		// highest bucket start of 0.001 sec * 2^11 = 2.048 sec
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 12),
 	})
 
 	proposePackBytes = promauto.NewHistogram(prometheus.HistogramOpts{
@@ -40,9 +40,9 @@ var (
 		Namespace: "ragit",
 		Name:      "serve_ready_duration_seconds",
 		Help:      "The latency distributions of serve ready",
-		// lowest bucket start of upper bound 0.01 sec (10ms) with factor 2
-		// highest bucket start of 0.01 sec * 2^11 = 20.48 sec
-		Buckets: prometheus.ExponentialBuckets(0.01, 2, 12),
+		// lowest bucket start of upper bound 0.001 sec (1ms) with factor 2
+		// highest bucket start of 0.001 sec * 2^11 = 2.048 sec
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 12),
 	})
 
 	leaderChanges = prometheus.NewCounter(prometheus.CounterOpts{
