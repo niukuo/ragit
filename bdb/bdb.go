@@ -974,9 +974,13 @@ func (s *storage) Bootstrap(members []refs.Member) error {
 }
 
 func (s *storage) GetInitState() (*ragit.InitialState, error) {
+	return getInitStateWithDB(s.db)
+}
+
+func getInitStateWithDB(db *bbolt.DB) (*ragit.InitialState, error) {
 	var state ragit.InitialState
 
-	if err := s.db.View(func(tx *bbolt.Tx) error {
+	if err := db.View(func(tx *bbolt.Tx) error {
 		stateb := tx.Bucket(BucketState)
 		metab := tx.Bucket(BucketMeta)
 		membersb := tx.Bucket(BucketMembers)
