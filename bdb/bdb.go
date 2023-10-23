@@ -46,7 +46,8 @@ type storage struct {
 
 	leaderTerm uint64
 
-	applyWaits *waitApplyRequests
+	applyWaits   *waitApplyRequests
+	waitApplyCap int
 
 	subMgr atomic.Pointer[subMgr]
 
@@ -77,6 +78,7 @@ type memberAttributes struct {
 
 func Open(path string,
 	opts *Options,
+	storageOpts ...StorageOptions,
 ) (Storage, error) {
 
 	walOpts := opts.WALOptions
@@ -101,10 +103,16 @@ func Open(path string,
 		listener:   opts.Listener,
 		db:         db,
 
-		applyWaits: newWaitApplyRequests(100, opts.Logger),
+		waitApplyCap: 100,
 
 		logger: opts.Logger,
 	}
+
+	for _, opt := range storageOpts {
+		opt(s)
+	}
+
+	s.applyWaits = newWaitApplyRequests(s.waitApplyCap, s.logger)
 
 	err = s.initBuckets(opts.NewLocalID)
 	if err != nil {
@@ -1287,13 +1295,10 @@ func (s *storage) WaitForApplyIndex(ctx context.Context, appliedIndex uint64) er
 
 	defer s.applyWaits.delRequest(req.reqID)
 
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-
 	select {
 	case <-req.resCh:
 		return nil
-	case <-ctxWithTimeout.Done():
+	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
