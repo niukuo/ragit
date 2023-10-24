@@ -7,3 +7,9 @@ func WithWaitApplyCap(cap int) StorageOptions {
 		s.waitApplyCap = cap
 	}
 }
+
+func WithSubscriberCap(cap int) StorageOptions {
+	return func(s *storage) {
+		s.subCap = cap
+	}
+}

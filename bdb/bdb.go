@@ -50,6 +50,7 @@ type storage struct {
 	waitApplyCap int
 
 	subMgr atomic.Pointer[subMgr]
+	subCap int
 
 	// logger is always the last member in struct
 	logger logging.Logger
@@ -105,6 +106,8 @@ func Open(path string,
 
 		waitApplyCap: 100,
 
+		subCap: 100,
+
 		logger: opts.Logger,
 	}
 
@@ -129,7 +132,7 @@ func Open(path string,
 		return nil, err
 	}
 
-	cap := 100 // TODO
+	cap := s.subCap
 
 	firstIndex, err := wal.FirstIndex()
 	if err != nil {
@@ -689,7 +692,7 @@ func (s *storage) OnSnapshot(
 	s.applyWaits.applyConfIndex(snapshot.Metadata.Index)
 	s.applyWaits.applyDataIndex(snapshot.Metadata.Index)
 
-	cap := 100 // TODO
+	cap := s.subCap
 
 	subMgr := newSubMgr(snapshot.Metadata.Index,
 		WithSubMgrLogger(s.logger),
