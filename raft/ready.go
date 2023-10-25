@@ -635,6 +635,7 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 			case pb.ConfChangeRemoveNode:
 				if cc.NodeID == uint64(rc.id) {
 					rc.mayTransferLeader()
+					return fmt.Errorf("self %s has been removed from cluster, to stop", rc.id)
 				} else if rc.transport.Get(types.ID(cc.NodeID)) != nil {
 					rc.transport.RemovePeer(types.ID(cc.NodeID))
 					rc.raftLogger.Infof("transport.RemovePeer of id %s", types.ID(cc.NodeID))
