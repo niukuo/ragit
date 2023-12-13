@@ -329,7 +329,8 @@ func (rc *raftNode) Propose(ctx context.Context, cmds []*packp.Command, pack []b
 	deleteOnly := true
 
 	for _, cmd := range cmds {
-		if !strings.HasPrefix(string(cmd.Name), "refs/") {
+		if refStr := string(cmd.Name); !strings.HasPrefix(refStr, "refs/") ||
+			strings.HasSuffix(refStr, "/") {
 			return nil, fmt.Errorf("invalid refs: %s", cmd.Name)
 		}
 		op := &refs.Oplog_Op{
