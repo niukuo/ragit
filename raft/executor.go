@@ -10,6 +10,12 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+var errSkipEntry = errors.New("skip entry")
+
+func ErrSkipEntry() error {
+	return errSkipEntry
+}
+
 type Executor interface {
 	Runner
 
@@ -165,7 +171,9 @@ func (e *executor) applyEntry(entry *pb.Entry) (err error) {
 		return err
 	}
 	if err = e.sm.OnApply(entry.Term, entry.Index, &oplog, handle); err != nil {
-		return err
+		if handle != nil || !errors.Is(err, errSkipEntry) {
+			return err
+		}
 	}
 
 	return nil
