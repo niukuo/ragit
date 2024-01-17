@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -28,8 +29,12 @@ import (
 	"github.com/go-git/go-git/v5/utils/ioutil"
 	"github.com/juju/errors"
 	"github.com/niukuo/ragit/logging"
+	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
 )
+
+var flag_SkipNextErrEntry = flag.Bool("ragit.skip_next_err_entry", false,
+	"skip next error entry, only valid for the first one")
 
 // Listener executes git command during apply
 type Listener = *listener
@@ -150,8 +155,17 @@ func (l *listener) Apply(oplog *refs.Oplog, handle refs.ReqHandle) error {
 		return err
 	}
 
+	canSkip := *flag_SkipNextErrEntry
+	*flag_SkipNextErrEntry = false
+
 	if err := status.Error(); err != nil {
-		l.logger.Warning("refs not updated, err: ", err)
+		if canSkip {
+			l.logger.Info("refs not updated and skipped, err: ", err)
+			err = raft.ErrSkipEntry()
+		} else {
+
+			l.logger.Warning("refs not updated, err: ", err)
+		}
 		return err
 	}
 
