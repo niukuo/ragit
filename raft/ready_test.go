@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/niukuo/ragit/refs"
 	"github.com/stretchr/testify/assert"
 	pb "go.etcd.io/etcd/raft/v3/raftpb"
@@ -139,4 +141,23 @@ func TestCheckAndGetChangeMembers(t *testing.T) {
 	}
 	_, err = rh.checkAndGetChangeMembers(cc)
 	s.Error(err)
+}
+
+func TestCommand(t *testing.T) {
+	s := assert.New(t)
+
+	cmd := &packp.Command{
+		Name: plumbing.NewBranchReferenceName(".name"),
+	}
+	s.Error(cmd.Name.Validate())
+
+	cmd = &packp.Command{
+		Name: plumbing.NewBranchReferenceName("name"),
+	}
+	s.NoError(cmd.Name.Validate())
+
+	cmd = &packp.Command{
+		Name: plumbing.NewTagReferenceName("name"),
+	}
+	s.NoError(cmd.Name.Validate())
 }

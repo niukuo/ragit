@@ -876,6 +876,9 @@ func (rc *readyHandler) Propose(ctx context.Context, cmds []*packp.Command, pack
 	}()
 
 	for _, cmd := range sortedCmds {
+		if err := cmd.Name.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid ref format: %s, err: %w", cmd.Name, err)
+		}
 		u, err := rc.txnLocker.Lock(ctx, cmd.Name)
 		if err != nil {
 			return nil, fmt.Errorf("lock ref %s failed, err: %w", cmd.Name, err)
