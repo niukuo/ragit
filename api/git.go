@@ -7,22 +7,17 @@ https://github.com/git/git/blob/master/Documentation/technical/http-protocol.txt
 import (
 	"bytes"
 	"compress/gzip"
-	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os/exec"
-	"path"
 	"time"
 
 	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/format/packfile"
 	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 	"github.com/niukuo/ragit/bdb"
-	"github.com/niukuo/ragit/gitexec"
 	"github.com/niukuo/ragit/logging"
 	"github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
@@ -96,29 +91,29 @@ func NewGitHandler(
 func (h *httpGitAPI) AdvertisedReferences(service Service) (*packp.AdvRefs, error) {
 	ar := packp.NewAdvRefs()
 
+	var caps []capability.Capability
+
 	if service == Service_ReceivePack {
-		if err := ar.Capabilities.Set(capability.DeleteRefs); err != nil {
-			return nil, err
-		}
-		if err := ar.Capabilities.Set(capability.Atomic); err != nil {
-			return nil, err
-		}
-		if err := ar.Capabilities.Set(capability.ReportStatus); err != nil {
-			return nil, err
+		caps = []capability.Capability{
+			capability.DeleteRefs,
+			capability.Atomic,
+			capability.ReportStatus,
+			capability.Sideband64k,
+			capability.OFSDelta,
 		}
 	}
-
 	if service == Service_UploadPack {
-		if err := ar.Capabilities.Set(capability.Sideband64k); err != nil {
-			return nil, err
-		}
-		if err := ar.Capabilities.Set(capability.MultiACKDetailed); err != nil {
-			return nil, err
+		caps = []capability.Capability{
+			capability.Sideband64k,
+			capability.MultiACKDetailed,
+			capability.OFSDelta,
 		}
 	}
 
-	if err := ar.Capabilities.Set(capability.OFSDelta); err != nil {
-		return nil, err
+	for _, cap := range caps {
+		if err := ar.Capabilities.Set(cap); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := ar.Capabilities.Set(capability.Agent, capability.DefaultAgent()); err != nil {
@@ -191,99 +186,6 @@ func (h *httpGitAPI) GetRefs(w http.ResponseWriter, r *http.Request) {
 	info.Encode(w)
 }
 
-func (h *httpGitAPI) ReceivePack(w http.ResponseWriter, r *http.Request) {
-	req := packp.NewReferenceUpdateRequest()
-	var reader io.Reader = r.Body
-
-	sm := h.rdb.(bdb.Storage)
-	isLead := sm.GetLeaderTerm() != 0
-	if !isLead {
-		h.forwardToLeader(r.Context(), w)
-		return
-	}
-
-	if r.ContentLength == 4 {
-		c, err := ioutil.ReadAll(reader)
-		if err != nil {
-			h.logger.Errorf("ioutil.ReadAll failed, err: %v", err)
-			refs.ReportReceivePackError(w, err.Error())
-			return
-		}
-		if string(c) == "0000" {
-			return
-		}
-		reader = bytes.NewReader(c)
-	}
-
-	if err := req.Decode(reader); err != nil {
-		h.logger.Errorf("req.Decode failed, err: %v", err)
-		refs.ReportReceivePackError(w, err.Error())
-		return
-	}
-
-	var refNames []plumbing.ReferenceName
-	for _, cmd := range req.Commands {
-		refNames = append(refNames, cmd.Name)
-	}
-
-	tx, err := h.node.BeginTx(func(txnLocker raft.MapLocker, storage raft.Storage) (
-		map[plumbing.ReferenceName]plumbing.Hash, bool, raft.Unlocker, error) {
-		return raft.LockRefList(r.Context(), txnLocker, storage, refNames[0], refNames[1:]...)
-	})
-	if err != nil {
-		h.logger.Warning("begin tx failed, err: ", err)
-		refs.ReportReceivePackError(w, err.Error())
-		return
-	}
-	defer tx.Close()
-
-	for _, cmd := range req.Commands {
-		if hash := tx.Get(cmd.Name); *hash != cmd.Old {
-			refs.ReportReceivePackError(w, "fetch first")
-			return
-		} else {
-			*hash = cmd.New
-		}
-	}
-
-	content, err := ioutil.ReadAll(req.Packfile)
-	if err != nil {
-		h.logger.Errorf("ioutil.ReadAll failed, err: %v", err)
-		refs.ReportReceivePackError(w, err.Error())
-		return
-	}
-
-	if len(content) > 0 {
-		if err := h.checkLimitSize(content); err != nil {
-			h.logger.Errorf("check size failed, err: %v", err)
-			refs.ReportReceivePackError(w, err.Error())
-			return
-		}
-	} else {
-		content = nil
-	}
-
-	writerCh := make(chan io.Writer)
-	defer close(writerCh)
-	rreq, err := tx.Commit(r.Context(), content, gitexec.WriterCh(writerCh))
-	if err != nil {
-		h.logger.Errorf("propose failed, err: %v", err)
-		refs.ReportReceivePackError(w, err.Error())
-		return
-	}
-
-	select {
-	case <-r.Context().Done():
-	case <-rreq.Done():
-		if err := rreq.Err(); err != nil {
-			refs.ReportReceivePackError(w, err.Error())
-		}
-	case writerCh <- w:
-		<-rreq.Done()
-	}
-
-}
-
 func (h *httpGitAPI) UploadPack(w http.ResponseWriter, r *http.Request) {
 	h.serviceRPC(w, r, "upload-pack")
 }
@@ -336,55 +238,6 @@ func (h *httpGitAPI) serviceRPC(w http.ResponseWriter, r *http.Request, service 
 			", stderr: ", stderr.String())
 		return
 	}
-}
-
-func (h *httpGitAPI) forwardToLeader(ctx context.Context, w http.ResponseWriter) {
-	status, err := h.node.GetStatus(ctx)
-	if err != nil {
-		h.logger.Errorf("get status failed, err: %v", err)
-		refs.ReportReceivePackError(w, err.Error())
-		return
-	}
-
-	sm := h.rdb.(bdb.Storage)
-	leaderAddrs, err := sm.GetURLsByMemberID(refs.PeerID(status.Lead))
-	if err != nil {
-		h.logger.Errorf("get leaderAddrs failed, err: %v", err)
-		refs.ReportReceivePackError(w, err.Error())
-		return
-	}
-
-	w.Header().Set("Location", fmt.Sprintf("%s/%s/git-receive-pack",
-		leaderAddrs[0], path.Base(h.path)))
-
-	w.WriteHeader(http.StatusTemporaryRedirect)
-}
-
-func (h *httpGitAPI) checkLimitSize(content []byte) error {
-	packSize := len(content)
-	if int64(packSize) > h.maxPackSize {
-		return fmt.Errorf("pack file size: %d is larger than maxPackSize: %d", packSize, h.maxPackSize)
-	}
-
-	r := bytes.NewReader(content)
-	scanner := packfile.NewScanner(r)
-	_, objectNum, err := scanner.Header()
-	if err != nil {
-		return err
-	}
-
-	for i := uint32(0); i < objectNum; i++ {
-		objectHeader, err := scanner.NextObjectHeader()
-		if err != nil {
-			return err
-		}
-
-		if objectHeader.Length > h.maxFileSize {
-			return fmt.Errorf("object size: %d larger than %d", objectHeader.Length, h.maxFileSize)
-		}
-	}
-
-	return nil
 }
 
 func (h *httpGitAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {

@@ -18,7 +18,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/format/packfile"
-	"github.com/go-git/go-git/v5/plumbing/format/pktline"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/capability"
 	"github.com/go-git/go-git/v5/plumbing/protocol/packp/sideband"
@@ -73,7 +72,7 @@ func NewListener(dir string, logger logging.Logger, opts ...Options) (Listener, 
 	return l, nil
 }
 
-func (l *listener) Apply(oplog *refs.Oplog, handle refs.ReqHandle) error {
+func (l *listener) Apply(cmds []*packp.Command, packfile []byte, handle refs.ReqHandle) error {
 
 	start := time.Now()
 
@@ -82,76 +81,93 @@ func (l *listener) Apply(oplog *refs.Oplog, handle refs.ReqHandle) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Pdeathsig: syscall.SIGTERM,
 	}
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
 
-	var wbuf io.Writer = &stdout
-	if ch, ok := handle.(WriterCh); ok {
-		if w, ok := <-ch; ok {
-			wbuf = io.MultiWriter(wbuf, w)
-		}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
 	}
-
-	cmd.Stdout = wbuf
-	cmd.Stderr = &stderr
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return errors.Annotate(err, "stdin pipe err")
+		return err
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	var statusReader io.Reader = stdout
+
+	req := packp.NewReferenceUpdateRequest()
+	req.Commands = cmds
+	req.Packfile = io.NopCloser(bytes.NewReader(packfile))
+	caps := []capability.Capability{
+		capability.Atomic,
+		capability.ReportStatus,
+	}
+
+	if ch, ok := handle.(ReqCh); ok {
+		if oreq, ok := <-ch; ok {
+			var d *sideband.Demuxer
+			if oreq.Capabilities.Supports(capability.Sideband64k) {
+				d = sideband.NewDemuxer(sideband.Sideband64k, stdout)
+				caps = append(caps, capability.Sideband64k)
+			} else if oreq.Capabilities.Supports(capability.Sideband) {
+				d = sideband.NewDemuxer(sideband.Sideband, stdout)
+				caps = append(caps, capability.Sideband)
+			}
+			if d != nil {
+				l.logger.Info("apply with sideband progress",
+					", 64k: ", oreq.Capabilities.Supports(capability.Sideband64k),
+				)
+				// shouldn't write before channel closed
+				<-ch
+				d.Progress = oreq.Progress
+				statusReader = d
+			}
+
+		}
+	}
+
+	for _, cap := range caps {
+		if err := req.Capabilities.Set(cap); err != nil {
+			return err
+		}
 	}
 
 	if err := cmd.Start(); err != nil {
 		return errors.Annotate(err, "start err")
 	}
 
-	e := pktline.NewEncoder(stdin)
-
-	formatCommand := func(op *refs.Oplog_Op) string {
-		var o, n plumbing.Hash
-		copy(o[:], op.GetOldTarget())
-		copy(n[:], op.GetTarget())
-		return fmt.Sprintf("%s %s %s", o, n, op.GetName())
+	if err := req.Encode(stdin); err != nil {
+		return errors.Annotate(err, "encode err")
 	}
-
-	cap := capability.NewList()
-	cap.Set(capability.Atomic)
-	cap.Set(capability.ReportStatus)
-
-	if err := e.Encodef("%s\x00%s",
-		formatCommand(oplog.Ops[0]), cap.String()); err != nil {
-		return err
-	}
-
-	for _, cmd := range oplog.Ops[1:] {
-		if err := e.Encodef(formatCommand(cmd)); err != nil {
-			return err
-		}
-	}
-
-	if err := e.Flush(); err != nil {
-		return err
-	}
-
-	if _, err := bytes.NewReader(oplog.ObjPack).WriteTo(stdin); err != nil {
-		return errors.Annotate(err, "write packfile to stdin err")
-	}
-
 	if err := stdin.Close(); err != nil {
-		return errors.Annotate(err, "close stdin err")
+		l.logger.Warning("close stdin failed",
+			", err: ", err,
+		)
 	}
 
-	if err := cmd.Wait(); err != nil {
-		return errors.Annotate(err, "cmd Wait err")
+	statusData, err := io.ReadAll(statusReader)
+	if err != nil {
+		return err
 	}
+
+	var status packp.ReportStatus
+	decodeErr := status.Decode(bytes.NewReader(statusData))
+
+	waitErr := cmd.Wait()
 
 	if stderr.Len() > 0 {
 		l.logger.Warning("stderr: \n", stderr.String())
 	}
 
-	var status packp.ReportStatus
-	if err := status.Decode(bytes.NewReader(stdout.Bytes())); err != nil {
-		l.logger.Warning("decode report status err: ", err,
-			", out: \n", stdout.String())
+	if err := waitErr; err != nil {
+		l.logger.Warning("process exited unexpectedly, err: ", err)
+		return errors.Annotate(err, "cmd Wait err")
+	}
+
+	if err := decodeErr; err != nil {
+		l.logger.Warning("decode report status err: ", err, ", status: ", string(statusData))
 		return err
 	}
 

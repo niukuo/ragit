@@ -1,17 +1,19 @@
 package api
 
 import (
-	"io/ioutil"
+	"bytes"
+	"io"
 	"testing"
 
 	fixtures "github.com/go-git/go-git-fixtures/v4"
+	"github.com/go-git/go-git/v5/plumbing/format/packfile"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestCheckLimitSize(t *testing.T) {
 	s := assert.New(t)
 	f := fixtures.Basic().One()
-	content, err := ioutil.ReadAll(f.Packfile())
+	data, err := io.ReadAll(f.Packfile())
 	s.NoError(err)
 
 	h := &httpGitAPI{
@@ -19,21 +21,26 @@ func TestCheckLimitSize(t *testing.T) {
 		maxPackSize: DefaultMaxPackSize,
 	}
 
-	err = h.checkLimitSize(nil)
-	s.Error(err)
+	var content []byte
 
-	err = h.checkLimitSize([]byte{})
-	s.Error(err)
+	_, err = h.readPack(bytes.NewReader(nil))
+	s.ErrorIs(err, packfile.ErrEmptyPackfile)
 
-	err = h.checkLimitSize(content)
+	_, err = h.readPack(bytes.NewReader([]byte{}))
+	s.ErrorIs(err, packfile.ErrEmptyPackfile)
+
+	content, err = h.readPack(bytes.NewReader(data))
 	s.NoError(err)
+	s.NotNil(content)
 
 	h.maxFileSize = 10000
-	err = h.checkLimitSize(content)
+	content, err = h.readPack(bytes.NewReader(data))
 	s.Error(err)
+	s.Nil(content)
 
 	h.maxFileSize = DefaultMaxFileSize
 	h.maxPackSize = 10000
-	err = h.checkLimitSize(content)
+	content, err = h.readPack(bytes.NewReader(data))
 	s.Error(err)
+	s.Nil(content)
 }

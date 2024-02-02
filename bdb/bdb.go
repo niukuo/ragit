@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/protocol/packp"
 	"github.com/niukuo/ragit/logging"
 	ragit "github.com/niukuo/ragit/raft"
 	"github.com/niukuo/ragit/refs"
@@ -782,6 +784,23 @@ func (s *storage) GetConfState() (*pb.ConfState, error) {
 func (s *storage) OnApply(term, index uint64, oplog *refs.Oplog, handle refs.ReqHandle) error {
 	start := time.Now()
 
+	cmds := make([]*packp.Command, 0, len(oplog.GetOps()))
+
+	parseHash := func(buf []byte) (plumbing.Hash, error) {
+		var hash plumbing.Hash
+		switch len(buf) {
+		case 0:
+		case refs.HashLen:
+			copy(hash[:], buf)
+			if hash.IsZero() {
+				return plumbing.Hash{}, errors.New("empty hash")
+			}
+		default:
+			return plumbing.Hash{}, fmt.Errorf("invalid target %x", buf)
+		}
+		return hash, nil
+	}
+
 	if err := s.db.Update(func(tx *bbolt.Tx) error {
 		metab := tx.Bucket(BucketMeta)
 		if err := putUint64(metab, map[string]uint64{
@@ -798,40 +817,41 @@ func (s *storage) OnApply(term, index uint64, oplog *refs.Oplog, handle refs.Req
 		refsb := tx.Bucket(BucketRefs)
 
 		for _, op := range oplog.GetOps() {
-			name := []byte(op.GetName())
 			target := op.GetTarget()
 			oldTarget := op.GetOldTarget()
-			currentTarget := refsb.Get(name)
+			cmd := &packp.Command{
+				Name: plumbing.ReferenceName(op.GetName()),
+			}
+			var err error
+			if cmd.Old, err = parseHash(oldTarget); err != nil {
+				return fmt.Errorf("invalid old target for %s: %w", cmd.Name, err)
+			}
+			if cmd.New, err = parseHash(target); err != nil {
+				return fmt.Errorf("invalid new target for %s: %w", cmd.Name, err)
+			}
+			currentTarget := refsb.Get([]byte(cmd.Name))
 			if !bytes.Equal(oldTarget, currentTarget) {
 				err := fmt.Errorf("old target check failed for %s, expected: %x, actual: %x",
-					name, oldTarget, currentTarget)
+					cmd.Name, oldTarget, currentTarget)
 				s.logger.Warning(err)
 				return err
 			}
-			switch len(target) {
-			case 0:
-			case refs.HashLen:
-			default:
-				return fmt.Errorf("invalid target %x for %s", target, op.GetName())
-			}
+			cmds = append(cmds, cmd)
 		}
 
-		for _, op := range oplog.GetOps() {
-			name := []byte(op.GetName())
-			target := op.GetTarget()
-			switch len(target) {
-			case 0:
-				if err := refsb.Delete([]byte(name)); err != nil {
+		for _, cmd := range cmds {
+			if cmd.New.IsZero() {
+				if err := refsb.Delete([]byte(cmd.Name)); err != nil {
 					return err
 				}
-			case refs.HashLen:
-				if err := refsb.Put([]byte(name), target); err != nil {
+			} else {
+				if err := refsb.Put([]byte(cmd.Name), cmd.New[:]); err != nil {
 					return err
 				}
 			}
 		}
 
-		if err := s.listener.Apply(oplog, handle); err != nil {
+		if err := s.listener.Apply(cmds, oplog.GetObjPack(), handle); err != nil {
 			return err
 		}
 
