@@ -45,7 +45,7 @@ var (
 		Buckets: prometheus.ExponentialBuckets(0.001, 2, 12),
 	})
 
-	leaderChanges = prometheus.NewCounter(prometheus.CounterOpts{
+	leaderChanges = promauto.NewCounter(prometheus.CounterOpts{
 		Namespace: "ragit",
 		Name:      "leader_changes_seen_total",
 		Help:      "The number of leader changes seen.",
