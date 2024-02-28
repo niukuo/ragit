@@ -602,6 +602,7 @@ func (rc *readyHandler) applyEntry(entry *pb.Entry) error {
 				// by setting the NodeID field to zero before calling ApplyConfChange
 				cc.NodeID = raft.None
 				rc.raft.applyConfChange(cc)
+				rc.storage.OnConfIndexChange(entry.Index)
 				return nil
 			}
 
